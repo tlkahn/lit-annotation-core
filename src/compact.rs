@@ -2,8 +2,14 @@ use super::types::*;
 use regex::Regex;
 use std::sync::LazyLock;
 
+// Unanchored: used only for the `lang=` disambiguation gate (is the token
+// after `lang=` an `@YYYY-MM` date?). Body/date splitting uses
+// `TRAILING_DATE_RE` so mid-body dates stay in the body text.
 static DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@(\d{4}-\d{2}(?:-\d{2})?)").unwrap());
+
+static TRAILING_DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@(\d{4}-\d{2}(?:-\d{2})?)\s*$").unwrap());
 
 static ANCHOR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\^"((?:[^"\\]|\\.)+)""#).unwrap());
@@ -129,7 +135,14 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
 
     remaining = remaining.trim_start();
 
+    // Non-empty residue before `|` means unrecognized header tokens (e.g.
+    // `n garbage | body` or `n lang=fr \p | body`). Mirror block-form R1-11:
+    // keep any fields already parsed, but flip `is_structured` false.
+    let mut unrecognized = false;
     let body_text = if let Some(idx) = remaining.find('|') {
+        if !remaining[..idx].trim().is_empty() {
+            unrecognized = true;
+        }
         let after_pipe = remaining[idx + 1..].trim_start();
         is_structured = true;
         after_pipe
@@ -137,7 +150,7 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         remaining
     };
 
-    let (body_clean, date) = if let Some(caps) = DATE_RE.captures(body_text) {
+    let (body_clean, date) = if let Some(caps) = TRAILING_DATE_RE.captures(body_text) {
         let date_str = caps.get(1).unwrap().as_str().to_string();
         let before_date = body_text[..caps.get(0).unwrap().start()].trim_end();
         is_structured = true;
@@ -152,6 +165,8 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         Some(body_clean.to_string())
     };
 
+    // Free-text fallback keys on whether any production matched, not on the
+    // unrecognized flag, so parsed fields (type, lang, body) are retained.
     if !is_structured {
         let trimmed = inner.trim();
         return Annotation {
@@ -182,7 +197,7 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         scope,
         body,
         date,
-        is_structured,
+        is_structured: is_structured && !unrecognized,
         char_start: 0,
         char_end: 0,
         original: String::new(),
@@ -848,5 +863,60 @@ mod tests {
         let ann = parse_compact("compare Vasugupta SpK 1.1", marks::builtin_mark_codes());
         assert!(!ann.is_structured);
         assert_eq!(ann.body, Some("compare Vasugupta SpK 1.1".to_string()));
+    }
+
+    // --- trailing-only date extraction (A1) --------------------------------
+
+    #[test]
+    fn mid_body_date_is_not_extracted() {
+        let ann = parse_compact(
+            "n: | published @2026-03 in Paris",
+            marks::builtin_mark_codes(),
+        );
+        assert_eq!(ann.body, Some("published @2026-03 in Paris".to_string()));
+        assert_eq!(ann.date, None);
+    }
+
+    #[test]
+    fn mid_body_full_precision_date_is_not_extracted() {
+        let ann = parse_compact("n: | see @2026-03-05 edition", marks::builtin_mark_codes());
+        assert_eq!(ann.body, Some("see @2026-03-05 edition".to_string()));
+        assert_eq!(ann.date, None);
+    }
+
+    #[test]
+    fn trailing_date_with_pipe_and_no_body() {
+        let ann = parse_compact("n: | @2026-03", marks::builtin_mark_codes());
+        assert_eq!(ann.body, None);
+        assert_eq!(ann.date, Some("2026-03".to_string()));
+    }
+
+    // --- pre-pipe residue flips is_structured (A4) ------------------------
+
+    #[test]
+    fn pre_pipe_residue_makes_unstructured() {
+        let ann = parse_compact("n garbage here | body", marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
+        assert_eq!(ann.annotation_type, AnnotationType::Note);
+    }
+
+    #[test]
+    fn lang_then_stray_scope_token_makes_unstructured() {
+        let ann = parse_compact(r"n lang=fr \p | body", marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+        assert_eq!(ann.lang, Some("fr".to_string()));
+        assert_eq!(ann.body, Some("body".to_string()));
+    }
+
+    #[test]
+    fn clean_pipe_stays_structured() {
+        let ann = parse_compact("n: | body", marks::builtin_mark_codes());
+        assert!(ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
+
+        let ann = parse_compact("| body", marks::builtin_mark_codes());
+        assert!(ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
     }
 }
