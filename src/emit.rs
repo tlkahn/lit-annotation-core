@@ -81,7 +81,11 @@ fn serialize_scope(scope: &Scope) -> String {
         }
         Scope::Document => "\\d".to_string(),
         Scope::Section => "\\h".to_string(),
-        Scope::Asymmetric { unit, before, after } => {
+        Scope::Asymmetric {
+            unit,
+            before,
+            after,
+        } => {
             let u = match unit {
                 ScopeKind::Word => return format!("{}_{}", before, after),
                 ScopeKind::Sentence => "s",
@@ -97,7 +101,11 @@ pub fn emit_annotation(fields: &EmitFields) -> String {
     let type_str = serialize_type(&fields.annotation_type);
     let cert_str = serialize_certainty(&fields.certainty);
     let scope_str = serialize_scope(&fields.scope);
-    let date_str = fields.date.as_ref().map(|d| format!("@{}", d)).unwrap_or_default();
+    let date_str = fields
+        .date
+        .as_ref()
+        .map(|d| format!("@{}", d))
+        .unwrap_or_default();
 
     if fields.body.contains('\n') {
         return emit_block(fields, type_str, cert_str, &scope_str, &date_str);
@@ -113,7 +121,11 @@ fn emit_compact(
     scope_str: &str,
     date_str: &str,
 ) -> String {
-    let id_str = fields.id.as_ref().map(|id| format!("[{}]", id)).unwrap_or_default();
+    let id_str = fields
+        .id
+        .as_ref()
+        .map(|id| format!("[{}]", id))
+        .unwrap_or_default();
     let type_cert = format!("{}{}", type_str, cert_str);
 
     let mut header_parts = Vec::new();
@@ -371,7 +383,10 @@ mod tests {
         };
         let dsl = emit_annotation(&fields);
         assert!(dsl.contains("n "), "Expected 'n ' in: {}", dsl);
-        assert!(!dsl.contains("n?") && !dsl.contains("n!"), "Should not have certainty marker");
+        assert!(
+            !dsl.contains("n?") && !dsl.contains("n!"),
+            "Should not have certainty marker"
+        );
     }
 
     #[test]
@@ -496,7 +511,10 @@ mod tests {
     fn ensure_authored_uuid_replaces_empty_bracket() {
         let original = "<!---[] n | body --->";
         let r = ensure_authored_uuid(original, "new");
-        assert!(r.changed, "empty brackets should not be treated as an authored id");
+        assert!(
+            r.changed,
+            "empty brackets should not be treated as an authored id"
+        );
         assert_eq!(r.id, "new");
         assert_eq!(r.original, "<!---[new] n | body --->");
     }
@@ -505,7 +523,10 @@ mod tests {
     fn ensure_authored_uuid_replaces_invalid_bracket_token() {
         let original = "<!---[-bad] n | body --->";
         let r = ensure_authored_uuid(original, "new");
-        assert!(r.changed, "invalid bracket token should not be treated as an authored id");
+        assert!(
+            r.changed,
+            "invalid bracket token should not be treated as an authored id"
+        );
         assert_eq!(r.id, "new");
         assert_eq!(r.original, "<!---[new] n | body --->");
     }
@@ -641,6 +662,9 @@ mod tests {
     fn utf16_inverted_range() {
         let text = "abc";
         let (start, end) = utf16_offsets_to_byte(text, 5, 2);
-        assert!(start <= end, "byte_start ({start}) must be <= byte_end ({end})");
+        assert!(
+            start <= end,
+            "byte_start ({start}) must be <= byte_end ({end})"
+        );
     }
 }

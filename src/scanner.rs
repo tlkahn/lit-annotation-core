@@ -1,5 +1,5 @@
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawAnnotation {
@@ -10,16 +10,16 @@ pub struct RawAnnotation {
     pub id: Option<String>,
 }
 
-static ID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[([a-zA-Z0-9][a-zA-Z0-9_.\-]*)\]").unwrap()
-});
+static ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[([a-zA-Z0-9][a-zA-Z0-9_.\-]*)\]").unwrap());
 
 pub fn is_valid_authored_id(id: &str) -> bool {
     !id.is_empty()
         && id.as_bytes()[0].is_ascii_alphanumeric()
-        && id.bytes().skip(1).all(|b| {
-            b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
-        })
+        && id
+            .bytes()
+            .skip(1)
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
 }
 
 pub fn extract_id(inner: &str) -> (Option<String>, &str) {
@@ -37,6 +37,14 @@ pub fn utf16_len(s: &str) -> usize {
 }
 
 pub fn scan_annotations(content: &str) -> Vec<RawAnnotation> {
+    // Skip is one-directional by design: legacy `%%!...%%` scanning skips ranges
+    // covered by new-format `<!---...--->` fences (and code fences), but the
+    // new-format scan does NOT skip ranges inside a legacy fence. A legacy
+    // annotation whose body contains `<!---...--->` is therefore double-parsed
+    // (once as the outer legacy annotation, once as the inner new-format one).
+    // Making the skip bidirectional would drop the inner hit; leaving it as-is
+    // preserves every delimiter pair the author wrote. See the characterization
+    // test `legacy_containing_new_format_is_double_parsed`.
     let fenced = find_fenced_ranges(content);
     let new_ann_ranges = find_new_annotation_byte_ranges(content);
 
@@ -193,7 +201,9 @@ fn detect_fence_close(trimmed: &str, marker: &str) -> bool {
 }
 
 pub fn is_in_fenced_range(byte_offset: usize, ranges: &[FencedRange]) -> bool {
-    ranges.iter().any(|r| byte_offset >= r.start && byte_offset < r.end)
+    ranges
+        .iter()
+        .any(|r| byte_offset >= r.start && byte_offset < r.end)
 }
 
 #[cfg(test)]
@@ -461,6 +471,32 @@ mod tests {
         assert_eq!(anns[1].inner, "legacy");
     }
 
+    #[test]
+    fn legacy_containing_new_format_is_double_parsed() {
+        // Characterization (A3): skip is one-directional, so a legacy fence
+        // whose body embeds a new-format fence yields two annotations.
+        let doc = "%%! legacy <!--- n | inner ---> note %%";
+        let anns = scan_annotations(doc);
+        assert_eq!(anns.len(), 2, "expected double-parse, got {anns:?}");
+        // Sorted by char_start: inner new-format first (starts later in the
+        // outer string? actually new-format open is after "%%! legacy ").
+        // Outer legacy spans the whole; inner is nested. After sort+dedup by
+        // char_start they remain distinct because starts differ.
+        let inners: Vec<&str> = anns.iter().map(|a| a.inner.as_str()).collect();
+        assert!(
+            inners
+                .iter()
+                .any(|i| i.contains("inner") || *i == "n | inner"),
+            "missing inner new-format annotation: {inners:?}"
+        );
+        assert!(
+            inners
+                .iter()
+                .any(|i| i.contains("legacy") && i.contains("note")),
+            "missing outer legacy annotation: {inners:?}"
+        );
+    }
+
     // --- ID extraction tests ---
 
     #[test]
@@ -468,7 +504,10 @@ mod tests {
         let doc = "<!---[550e8400-e29b-41d4-a716-446655440000] n? __ | body --->";
         let anns = scan_annotations(doc);
         assert_eq!(anns.len(), 1);
-        assert_eq!(anns[0].id, Some("550e8400-e29b-41d4-a716-446655440000".to_string()));
+        assert_eq!(
+            anns[0].id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
         assert_eq!(anns[0].inner, "n? __ | body");
     }
 

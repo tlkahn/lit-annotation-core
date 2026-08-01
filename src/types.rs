@@ -190,7 +190,11 @@ impl Scope {
                 let (before_s, after_s) = scope_value.split_once(':')?;
                 let before = before_s.parse::<usize>().ok()?;
                 let after = after_s.parse::<usize>().ok()?;
-                Some(Self::Asymmetric { unit, before, after })
+                Some(Self::Asymmetric {
+                    unit,
+                    before,
+                    after,
+                })
             }
             _ => None,
         }
@@ -244,7 +248,10 @@ mod tests {
 
     #[test]
     fn annotation_type_question() {
-        assert_eq!(AnnotationType::from_str("q"), Some(AnnotationType::Question));
+        assert_eq!(
+            AnnotationType::from_str("q"),
+            Some(AnnotationType::Question)
+        );
     }
 
     #[test]
@@ -254,17 +261,26 @@ mod tests {
 
     #[test]
     fn annotation_type_crossref() {
-        assert_eq!(AnnotationType::from_str("cf"), Some(AnnotationType::CrossRef));
+        assert_eq!(
+            AnnotationType::from_str("cf"),
+            Some(AnnotationType::CrossRef)
+        );
     }
 
     #[test]
     fn annotation_type_apparatus() {
-        assert_eq!(AnnotationType::from_str("app"), Some(AnnotationType::Apparatus));
+        assert_eq!(
+            AnnotationType::from_str("app"),
+            Some(AnnotationType::Apparatus)
+        );
     }
 
     #[test]
     fn annotation_type_translation() {
-        assert_eq!(AnnotationType::from_str("tr"), Some(AnnotationType::Translation));
+        assert_eq!(
+            AnnotationType::from_str("tr"),
+            Some(AnnotationType::Translation)
+        );
     }
 
     #[test]
@@ -416,7 +432,10 @@ mod tests {
 
     #[test]
     fn annotation_type_slipnote() {
-        assert_eq!(AnnotationType::from_str("sn"), Some(AnnotationType::SlipNote));
+        assert_eq!(
+            AnnotationType::from_str("sn"),
+            Some(AnnotationType::SlipNote)
+        );
     }
 
     #[test]
@@ -467,7 +486,11 @@ mod tests {
     fn scope_asymmetric_paragraph_parse() {
         assert_eq!(
             Scope::try_parse(r"3\p1"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Paragraph, before: 3, after: 1 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Paragraph,
+                before: 3,
+                after: 1
+            })
         );
     }
 
@@ -475,7 +498,11 @@ mod tests {
     fn scope_asymmetric_sentence_parse() {
         assert_eq!(
             Scope::try_parse(r"0\s2"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Sentence, before: 0, after: 2 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 0,
+                after: 2
+            })
         );
     }
 
@@ -483,7 +510,11 @@ mod tests {
     fn scope_asymmetric_word_parse() {
         assert_eq!(
             Scope::try_parse("3_1"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Word, before: 3, after: 1 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Word,
+                before: 3,
+                after: 1
+            })
         );
     }
 
@@ -491,13 +522,21 @@ mod tests {
     fn scope_asymmetric_page_parse() {
         assert_eq!(
             Scope::try_parse(r"2\f0"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Page, before: 2, after: 0 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Page,
+                before: 2,
+                after: 0
+            })
         );
     }
 
     #[test]
     fn scope_asymmetric_serde_roundtrip() {
-        let scope = Scope::Asymmetric { unit: ScopeKind::Paragraph, before: 3, after: 1 };
+        let scope = Scope::Asymmetric {
+            unit: ScopeKind::Paragraph,
+            before: 3,
+            after: 1,
+        };
         let json = serde_json::to_string(&scope).unwrap();
         let parsed: Scope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, scope);
@@ -507,11 +546,17 @@ mod tests {
     fn resolution_mode_serde() {
         let mode = ResolutionMode::Backward;
         let json = serde_json::to_string(&mode).unwrap();
-        assert_eq!(serde_json::from_str::<ResolutionMode>(&json).unwrap(), ResolutionMode::Backward);
+        assert_eq!(
+            serde_json::from_str::<ResolutionMode>(&json).unwrap(),
+            ResolutionMode::Backward
+        );
 
         let bidir = ResolutionMode::Bidirectional;
         let json2 = serde_json::to_string(&bidir).unwrap();
-        assert_eq!(serde_json::from_str::<ResolutionMode>(&json2).unwrap(), ResolutionMode::Bidirectional);
+        assert_eq!(
+            serde_json::from_str::<ResolutionMode>(&json2).unwrap(),
+            ResolutionMode::Bidirectional
+        );
     }
 
     #[test]
@@ -603,7 +648,10 @@ mod tests {
             lang: None,
         };
         let json = serde_json::to_string(&ann).unwrap();
-        assert!(!json.contains("uuid"), "JSON should omit uuid when None, got: {json}");
+        assert!(
+            !json.contains("uuid"),
+            "JSON should omit uuid when None, got: {json}"
+        );
     }
 
     #[test]
@@ -624,7 +672,10 @@ mod tests {
             lang: None,
         };
         let json = serde_json::to_string(&ann).unwrap();
-        assert!(json.contains(r#""uuid":"abc""#), "JSON should include uuid when Some, got: {json}");
+        assert!(
+            json.contains(r#""uuid":"abc""#),
+            "JSON should include uuid when Some, got: {json}"
+        );
         let parsed: Annotation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.uuid, Some("abc".to_string()));
     }
@@ -647,7 +698,10 @@ mod tests {
             lang: None,
         };
         let json = serde_json::to_string(&ann).unwrap();
-        assert!(json.contains(r#""uuid":"scanner-id""#), "JSON should contain scanner-id, got: {json}");
+        assert!(
+            json.contains(r#""uuid":"scanner-id""#),
+            "JSON should contain scanner-id, got: {json}"
+        );
         let parsed: Annotation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.uuid, Some("scanner-id".to_string()));
     }
@@ -678,7 +732,10 @@ mod tests {
             lang: None,
         };
         let json = serde_json::to_string(&ann).unwrap();
-        assert!(!json.contains("\"mark\""), "JSON should omit mark when None, got: {json}");
+        assert!(
+            !json.contains("\"mark\""),
+            "JSON should omit mark when None, got: {json}"
+        );
     }
 
     #[test]
@@ -699,7 +756,10 @@ mod tests {
             lang: None,
         };
         let json = serde_json::to_string(&ann).unwrap();
-        assert!(json.contains(r#""mark":"nb""#), "JSON should include mark when Some, got: {json}");
+        assert!(
+            json.contains(r#""mark":"nb""#),
+            "JSON should include mark when Some, got: {json}"
+        );
         let parsed: Annotation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mark, Some("nb".to_string()));
     }
@@ -732,7 +792,10 @@ mod tests {
 
     #[test]
     fn scope_from_db_anchor() {
-        assert_eq!(Scope::from_db("anchor", "text"), Some(Scope::Anchor("text".to_string())));
+        assert_eq!(
+            Scope::from_db("anchor", "text"),
+            Some(Scope::Anchor("text".to_string()))
+        );
     }
 
     #[test]
@@ -749,7 +812,11 @@ mod tests {
     fn scope_from_db_asymmetric_word() {
         assert_eq!(
             Scope::from_db("asymmetric_word", "3:1"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Word, before: 3, after: 1 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Word,
+                before: 3,
+                after: 1
+            })
         );
     }
 
@@ -757,7 +824,11 @@ mod tests {
     fn scope_from_db_asymmetric_sentence() {
         assert_eq!(
             Scope::from_db("asymmetric_sentence", "0:2"),
-            Some(Scope::Asymmetric { unit: ScopeKind::Sentence, before: 0, after: 2 })
+            Some(Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 0,
+                after: 2
+            })
         );
     }
 

@@ -36,7 +36,8 @@ pub struct MarkDef {
 pub struct MarkConfig(pub HashMap<String, MarkDef>);
 
 static BUILTIN: LazyLock<MarkConfig> = LazyLock::new(|| {
-    toml::from_str(include_str!("marks_builtin.toml")).expect("builtin marks_builtin.toml must parse")
+    toml::from_str(include_str!("marks_builtin.toml"))
+        .expect("builtin marks_builtin.toml must parse")
 });
 
 static BUILTIN_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -97,15 +98,21 @@ pub fn load_workspace_overrides(root: &Path) -> Option<MarkConfig> {
         .and_then(|s| toml::from_str(&s).ok())
 }
 
-/// Built-in defaults merged with any workspace overrides (workspace wins per code).
-pub fn merged_config(root: &Path) -> MarkConfig {
+/// Overlay `overrides` on the built-in mark config (overrides win per code).
+pub fn overlay_on_builtins(overrides: MarkConfig) -> MarkConfig {
     let mut merged = builtin_config().clone();
-    if let Some(overrides) = load_workspace_overrides(root) {
-        for (code, def) in overrides.0 {
-            merged.0.insert(code, def);
-        }
+    for (code, def) in overrides.0 {
+        merged.0.insert(code, def);
     }
     merged
+}
+
+/// Built-in defaults merged with any workspace overrides (workspace wins per code).
+pub fn merged_config(root: &Path) -> MarkConfig {
+    match load_workspace_overrides(root) {
+        Some(overrides) => overlay_on_builtins(overrides),
+        None => builtin_config().clone(),
+    }
 }
 
 struct MarkCacheEntry {
@@ -183,7 +190,10 @@ mod tests {
         let nb = config.0.get("nb").expect("nb present");
         assert_eq!(nb.label, "nota bene");
         let nb_style = nb.style.as_ref().expect("nb has style");
-        assert_eq!(nb_style.get("font-weight").map(String::as_str), Some("bold"));
+        assert_eq!(
+            nb_style.get("font-weight").map(String::as_str),
+            Some("bold")
+        );
 
         let crux = config.0.get("crux").expect("crux present");
         assert_eq!(crux.before.as_deref(), Some("†"));

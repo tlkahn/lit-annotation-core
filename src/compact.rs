@@ -1,18 +1,21 @@
-use std::sync::LazyLock;
-use regex::Regex;
 use super::types::*;
+use regex::Regex;
+use std::sync::LazyLock;
 
-static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@(\d{4}-\d{2}(?:-\d{2})?)").unwrap()
-});
+// Unanchored: used only for the `lang=` disambiguation gate (is the token
+// after `lang=` an `@YYYY-MM` date?). Body/date splitting uses
+// `TRAILING_DATE_RE` so mid-body dates stay in the body text.
+static DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@(\d{4}-\d{2}(?:-\d{2})?)").unwrap());
 
-static ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\^"((?:[^"\\]|\\.)+)""#).unwrap()
-});
+static TRAILING_DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@(\d{4}-\d{2}(?:-\d{2})?)\s*$").unwrap());
 
-static LANG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?i)lang\s*=\s*([a-z0-9_-]+)").unwrap()
-});
+static ANCHOR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\^"((?:[^"\\]|\\.)+)""#).unwrap());
+
+static LANG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?i)lang\s*=\s*([a-z0-9_-]+)").unwrap());
 
 static SCOPE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(_{1,}|\\p(?:p+|_{1,})?|\\f(?:f+|_{1,})?|\\s(?:s+|_{1,})?|\\d|\\h|\d+\\[psf]\d+|\d+_\d+)\s").unwrap()
@@ -117,8 +120,9 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
     if let Some(caps) = LANG_RE.captures(remaining) {
         let rest = &remaining[caps.get(0).unwrap().end()..];
         let after = rest.trim_start();
-        let unambiguous =
-            is_structured || after.is_empty() || after.starts_with('|')
+        let unambiguous = is_structured
+            || after.is_empty()
+            || after.starts_with('|')
             || (after.starts_with('@') && DATE_RE.is_match(after));
         if unambiguous {
             if let Some(normalized) = super::lang::normalize_lang(caps.get(1).unwrap().as_str()) {
@@ -131,7 +135,14 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
 
     remaining = remaining.trim_start();
 
+    // Non-empty residue before `|` means unrecognized header tokens (e.g.
+    // `n garbage | body` or `n lang=fr \p | body`). Mirror block-form R1-11:
+    // keep any fields already parsed, but flip `is_structured` false.
+    let mut unrecognized = false;
     let body_text = if let Some(idx) = remaining.find('|') {
+        if !remaining[..idx].trim().is_empty() {
+            unrecognized = true;
+        }
         let after_pipe = remaining[idx + 1..].trim_start();
         is_structured = true;
         after_pipe
@@ -139,7 +150,7 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         remaining
     };
 
-    let (body_clean, date) = if let Some(caps) = DATE_RE.captures(body_text) {
+    let (body_clean, date) = if let Some(caps) = TRAILING_DATE_RE.captures(body_text) {
         let date_str = caps.get(1).unwrap().as_str().to_string();
         let before_date = body_text[..caps.get(0).unwrap().start()].trim_end();
         is_structured = true;
@@ -154,13 +165,20 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         Some(body_clean.to_string())
     };
 
+    // Free-text fallback keys on whether any production matched, not on the
+    // unrecognized flag, so parsed fields (type, lang, body) are retained.
     if !is_structured {
+        let trimmed = inner.trim();
         return Annotation {
             form: AnnotationForm::Compact,
             annotation_type: AnnotationType::Bare,
             certainty: Certainty::Neutral,
             scope: Scope::Sentence(1),
-            body: Some(inner.to_string()),
+            body: if trimmed.is_empty() {
+                None
+            } else {
+                Some(inner.to_string())
+            },
             date: None,
             is_structured: false,
             char_start: 0,
@@ -179,7 +197,7 @@ pub fn parse_compact(inner: &str, mark_codes: &[String]) -> Annotation {
         scope,
         body,
         date,
-        is_structured,
+        is_structured: is_structured && !unrecognized,
         char_start: 0,
         char_end: 0,
         original: String::new(),
@@ -196,7 +214,10 @@ mod tests {
 
     #[test]
     fn full_compact_annotation() {
-        let ann = parse_compact("n? __ | same sense as TĀ 3.68? @2026-03", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            "n? __ | same sense as TĀ 3.68? @2026-03",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Note);
         assert_eq!(ann.certainty, Certainty::Tentative);
         assert_eq!(ann.scope, Scope::Words(2));
@@ -207,11 +228,17 @@ mod tests {
 
     #[test]
     fn todo_firm_with_anchor() {
-        let ann = parse_compact(r#"todo! ^"8th century" | Sanderson 2007 handout says 9th c."#, marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r#"todo! ^"8th century" | Sanderson 2007 handout says 9th c."#,
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Todo);
         assert_eq!(ann.certainty, Certainty::Firm);
         assert_eq!(ann.scope, Scope::Anchor("8th century".to_string()));
-        assert_eq!(ann.body, Some("Sanderson 2007 handout says 9th c.".to_string()));
+        assert_eq!(
+            ann.body,
+            Some("Sanderson 2007 handout says 9th c.".to_string())
+        );
         assert_eq!(ann.date, None);
     }
 
@@ -236,7 +263,10 @@ mod tests {
 
     #[test]
     fn apparatus_type() {
-        let ann = parse_compact("app: | variant reading in ms. B", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            "app: | variant reading in ms. B",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Apparatus);
         assert_eq!(ann.body, Some("variant reading in ms. B".to_string()));
     }
@@ -286,7 +316,10 @@ mod tests {
 
     #[test]
     fn question_with_scope_and_anchor() {
-        let ann = parse_compact(r#"q? ^"some phrase" | is this right?"#, marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r#"q? ^"some phrase" | is this right?"#,
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Question);
         assert_eq!(ann.scope, Scope::Anchor("some phrase".to_string()));
         assert_eq!(ann.body, Some("is this right?".to_string()));
@@ -294,15 +327,24 @@ mod tests {
 
     #[test]
     fn translation_type() {
-        let ann = parse_compact("tr: | Sanskrit translation of verse 3", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            "tr: | Sanskrit translation of verse 3",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Translation);
         assert_eq!(ann.certainty, Certainty::Neutral);
-        assert_eq!(ann.body, Some("Sanskrit translation of verse 3".to_string()));
+        assert_eq!(
+            ann.body,
+            Some("Sanskrit translation of verse 3".to_string())
+        );
     }
 
     #[test]
     fn translation_tentative_with_date() {
-        let ann = parse_compact("tr? _ | tentative rendering @2026-03", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            "tr? _ | tentative rendering @2026-03",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Translation);
         assert_eq!(ann.certainty, Certainty::Tentative);
         assert_eq!(ann.scope, Scope::Words(1));
@@ -319,7 +361,10 @@ mod tests {
 
     #[test]
     fn page_scope_two() {
-        let ann = parse_compact(r"n: \ff | this and preceding page", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r"n: \ff | this and preceding page",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.scope, Scope::Page(2));
     }
 
@@ -406,7 +451,10 @@ mod tests {
 
     #[test]
     fn llm_with_scope_and_certainty() {
-        let ann = parse_compact(r"llm! \p | summarize this section", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r"llm! \p | summarize this section",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Llm);
         assert_eq!(ann.certainty, Certainty::Firm);
         assert_eq!(ann.scope, Scope::Paragraph(1));
@@ -414,7 +462,10 @@ mod tests {
 
     #[test]
     fn document_scope_compact() {
-        let ann = parse_compact(r"llm \d | summarize entire document", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r"llm \d | summarize entire document",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.scope, Scope::Document);
         assert_eq!(ann.body, Some("summarize entire document".to_string()));
     }
@@ -428,19 +479,32 @@ mod tests {
 
     #[test]
     fn asymmetric_paragraph_scope_compact() {
-        let ann = parse_compact(r"n 3\p1 | three before one after", marks::builtin_mark_codes());
-        assert_eq!(ann.scope, Scope::Asymmetric {
-            unit: ScopeKind::Paragraph, before: 3, after: 1,
-        });
+        let ann = parse_compact(
+            r"n 3\p1 | three before one after",
+            marks::builtin_mark_codes(),
+        );
+        assert_eq!(
+            ann.scope,
+            Scope::Asymmetric {
+                unit: ScopeKind::Paragraph,
+                before: 3,
+                after: 1,
+            }
+        );
         assert_eq!(ann.body, Some("three before one after".to_string()));
     }
 
     #[test]
     fn asymmetric_word_scope_compact() {
         let ann = parse_compact("n 3_1 | asymmetric words", marks::builtin_mark_codes());
-        assert_eq!(ann.scope, Scope::Asymmetric {
-            unit: ScopeKind::Word, before: 3, after: 1,
-        });
+        assert_eq!(
+            ann.scope,
+            Scope::Asymmetric {
+                unit: ScopeKind::Word,
+                before: 3,
+                after: 1,
+            }
+        );
     }
 
     #[test]
@@ -461,7 +525,10 @@ mod tests {
 
     #[test]
     fn slipnote_compact_with_anchor_and_body() {
-        let ann = parse_compact(r#"sn ^"parent-uuid" | Compare with Braudel @2026-07-28"#, marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r#"sn ^"parent-uuid" | Compare with Braudel @2026-07-28"#,
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::SlipNote);
         assert_eq!(ann.certainty, Certainty::Neutral);
         assert_eq!(ann.scope, Scope::Anchor("parent-uuid".to_string()));
@@ -479,18 +546,36 @@ mod tests {
 
     #[test]
     fn slipnote_compact_with_certainty() {
-        let ann = parse_compact(r#"sn? ^"uuid" | tentative note"#, marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r#"sn? ^"uuid" | tentative note"#,
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::SlipNote);
         assert_eq!(ann.certainty, Certainty::Tentative);
     }
 
     #[test]
     fn existing_types_still_parse() {
-        assert_eq!(parse_compact("n | note", marks::builtin_mark_codes()).annotation_type, AnnotationType::Note);
-        assert_eq!(parse_compact("todo | task", marks::builtin_mark_codes()).annotation_type, AnnotationType::Todo);
-        assert_eq!(parse_compact("tr | translate", marks::builtin_mark_codes()).annotation_type, AnnotationType::Translation);
-        assert_eq!(parse_compact("q? | maybe", marks::builtin_mark_codes()).annotation_type, AnnotationType::Question);
-        assert_eq!(parse_compact("llm | go", marks::builtin_mark_codes()).annotation_type, AnnotationType::Llm);
+        assert_eq!(
+            parse_compact("n | note", marks::builtin_mark_codes()).annotation_type,
+            AnnotationType::Note
+        );
+        assert_eq!(
+            parse_compact("todo | task", marks::builtin_mark_codes()).annotation_type,
+            AnnotationType::Todo
+        );
+        assert_eq!(
+            parse_compact("tr | translate", marks::builtin_mark_codes()).annotation_type,
+            AnnotationType::Translation
+        );
+        assert_eq!(
+            parse_compact("q? | maybe", marks::builtin_mark_codes()).annotation_type,
+            AnnotationType::Question
+        );
+        assert_eq!(
+            parse_compact("llm | go", marks::builtin_mark_codes()).annotation_type,
+            AnnotationType::Llm
+        );
     }
 
     #[test]
@@ -606,7 +691,10 @@ mod tests {
 
     #[test]
     fn lang_after_scope_with_body() {
-        let ann = parse_compact(r"n? \ss lang=fr | même sens ? @2026-07", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r"n? \ss lang=fr | même sens ? @2026-07",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.annotation_type, AnnotationType::Note);
         assert_eq!(ann.certainty, Certainty::Tentative);
         assert_eq!(ann.scope, Scope::Sentence(2));
@@ -634,7 +722,10 @@ mod tests {
 
     #[test]
     fn lang_after_anchor() {
-        let ann = parse_compact(r#"cf ^"anuttara" lang=sa | parallels"#, marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r#"cf ^"anuttara" lang=sa | parallels"#,
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.scope, Scope::Anchor("anuttara".to_string()));
         assert_eq!(ann.lang, Some("sa".to_string()));
         assert_eq!(ann.body, Some("parallels".to_string()));
@@ -690,7 +781,10 @@ mod tests {
 
     #[test]
     fn lang_in_body_after_pipe_is_never_consumed() {
-        let ann = parse_compact(r"n \s | set lang=fr in the config", marks::builtin_mark_codes());
+        let ann = parse_compact(
+            r"n \s | set lang=fr in the config",
+            marks::builtin_mark_codes(),
+        );
         assert_eq!(ann.lang, None);
         assert_eq!(ann.body, Some("set lang=fr in the config".to_string()));
     }
@@ -744,5 +838,85 @@ mod tests {
         let ann = parse_compact(r"n \s lang=english | note", marks::builtin_mark_codes());
         assert_eq!(ann.lang, None);
         assert_eq!(ann.body, Some("note".to_string()));
+    }
+
+    // --- empty-body normalization (unstructured fallback) ------------------
+
+    #[test]
+    fn unstructured_empty_inner_yields_body_none() {
+        let ann = parse_compact("", marks::builtin_mark_codes());
+        assert_eq!(ann.annotation_type, AnnotationType::Bare);
+        assert!(!ann.is_structured);
+        assert_eq!(ann.body, None);
+    }
+
+    #[test]
+    fn unstructured_whitespace_only_inner_yields_body_none() {
+        let ann = parse_compact("   \t  ", marks::builtin_mark_codes());
+        assert_eq!(ann.annotation_type, AnnotationType::Bare);
+        assert!(!ann.is_structured);
+        assert_eq!(ann.body, None);
+    }
+
+    #[test]
+    fn unstructured_nonempty_inner_keeps_body() {
+        let ann = parse_compact("compare Vasugupta SpK 1.1", marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+        assert_eq!(ann.body, Some("compare Vasugupta SpK 1.1".to_string()));
+    }
+
+    // --- trailing-only date extraction (A1) --------------------------------
+
+    #[test]
+    fn mid_body_date_is_not_extracted() {
+        let ann = parse_compact(
+            "n: | published @2026-03 in Paris",
+            marks::builtin_mark_codes(),
+        );
+        assert_eq!(ann.body, Some("published @2026-03 in Paris".to_string()));
+        assert_eq!(ann.date, None);
+    }
+
+    #[test]
+    fn mid_body_full_precision_date_is_not_extracted() {
+        let ann = parse_compact("n: | see @2026-03-05 edition", marks::builtin_mark_codes());
+        assert_eq!(ann.body, Some("see @2026-03-05 edition".to_string()));
+        assert_eq!(ann.date, None);
+    }
+
+    #[test]
+    fn trailing_date_with_pipe_and_no_body() {
+        let ann = parse_compact("n: | @2026-03", marks::builtin_mark_codes());
+        assert_eq!(ann.body, None);
+        assert_eq!(ann.date, Some("2026-03".to_string()));
+    }
+
+    // --- pre-pipe residue flips is_structured (A4) ------------------------
+
+    #[test]
+    fn pre_pipe_residue_makes_unstructured() {
+        let ann = parse_compact("n garbage here | body", marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
+        assert_eq!(ann.annotation_type, AnnotationType::Note);
+    }
+
+    #[test]
+    fn lang_then_stray_scope_token_makes_unstructured() {
+        let ann = parse_compact(r"n lang=fr \p | body", marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+        assert_eq!(ann.lang, Some("fr".to_string()));
+        assert_eq!(ann.body, Some("body".to_string()));
+    }
+
+    #[test]
+    fn clean_pipe_stays_structured() {
+        let ann = parse_compact("n: | body", marks::builtin_mark_codes());
+        assert!(ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
+
+        let ann = parse_compact("| body", marks::builtin_mark_codes());
+        assert!(ann.is_structured);
+        assert_eq!(ann.body, Some("body".to_string()));
     }
 }

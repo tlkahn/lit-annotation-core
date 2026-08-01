@@ -18,5 +18,9 @@ toml = "0.8"
 # resolution (lit#945) - bump deliberately and re-run the ctx parity sweeps.
 sentencex = "=0.1.30"
 
+[[bin]]
+name = "lit-annotation"
+path = "src/bin/lit_annotation.rs"
+
 [dev-dependencies]
 tempfile = "3"
