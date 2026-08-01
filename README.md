@@ -43,6 +43,62 @@ When the grammar changes:
 
 `sentencex = "=0.1.30"` is pinned exactly. Sentence segmentation is load-bearing for scope resolution (lit#945): index time and live preview must agree on sentence boundaries. Bump deliberately and re-run the ctx parity sweeps.
 
+## CLI
+
+The crate also ships a thin `lit-annotation` binary for shell-level inspection and CI checks. The library API is unchanged; the binary is a thin shell over `parser` / `block` / `compact` / `marks`.
+
+```bash
+cargo build --release
+# binary at target/release/lit-annotation
+```
+
+```console
+# block form (document with annotation comments)
+$ lit-annotation --pretty <<'EOF'
+<!---
+n
+^"viracitaḥ"
+---
+Past participle of vi + √rac ("to arrange, compose") - "composed by, authored by."
+--->
+EOF
+
+# compact (inline) form
+$ echo '<!--- n? ^"dharma" | Possibly a technical term here. --->' | lit-annotation --pretty
+
+# bare input (no <!--- fences): treated as a single annotation body
+$ lit-annotation <<'EOF'
+n
+^"viracitaḥ"
+---
+Past participle of vi + √rac ("to arrange, compose") - "composed by, authored by."
+EOF
+
+# pipe-friendly
+$ cat doc.md | lit-annotation | jq '.[].body'
+
+# one or more file args instead of stdin
+$ lit-annotation notes.md chapter2.md
+
+# CI lint: fail if any annotation is unstructured
+$ lit-annotation --strict notes.md > /dev/null
+```
+
+| Flag | Effect |
+|------|--------|
+| `--pretty` | Pretty-print JSON (default: compact single-line) |
+| `--strict` | Exit 2 if any parsed annotation has `is_structured: false` |
+| `--marks <path>` | Load mark codes from a TOML file (overlay on builtins) |
+| `-h`, `--help` / `--version` | Standard |
+
+With no `FILE` args, read stdin. Multiple files yield one combined JSON array in file order. Zero annotations yields `[]`, not an error.
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | Success (including zero annotations) |
+| 1 | I/O or usage error (unreadable file, bad flag); diagnostics on stderr |
+| 2 | `--strict` only: at least one annotation parsed as unstructured |
+
 ## Development
 
 ```bash
