@@ -21,9 +21,8 @@ use std::sync::LazyLock;
 pub const DEFAULT_LANG: &str = "en";
 
 static KNOWN_SCRIPT_TAGS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    let json: Vec<&str> = serde_json::from_str(
-        include_str!("annotationLangScripts.json"),
-    ).expect("annotationLangScripts.json must be a valid JSON array of strings");
+    let json: Vec<&str> = serde_json::from_str(include_str!("annotationLangScripts.json"))
+        .expect("annotationLangScripts.json must be a valid JSON array of strings");
     json.into_iter().collect()
 });
 
@@ -87,14 +86,20 @@ pub struct AnnotationIndexOpts {
 
 impl Default for AnnotationIndexOpts {
     fn default() -> Self {
-        Self { enabled: true, default_lang: DEFAULT_LANG.to_string() }
+        Self {
+            enabled: true,
+            default_lang: DEFAULT_LANG.to_string(),
+        }
     }
 }
 
 impl AnnotationIndexOpts {
     /// Annotations off; the language is irrelevant but still well-formed.
     pub fn disabled() -> Self {
-        Self { enabled: false, default_lang: DEFAULT_LANG.to_string() }
+        Self {
+            enabled: false,
+            default_lang: DEFAULT_LANG.to_string(),
+        }
     }
 
     /// Annotations on with an explicit global default language.
@@ -297,7 +302,10 @@ mod tests {
     #[test]
     fn index_opts_with_lang_normalizes() {
         assert_eq!(AnnotationIndexOpts::with_lang("FR-CA").default_lang, "fr");
-        assert_eq!(AnnotationIndexOpts::with_lang("garbage!").default_lang, "en");
+        assert_eq!(
+            AnnotationIndexOpts::with_lang("garbage!").default_lang,
+            "en"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
-use super::types::Annotation;
-use super::scanner::scan_annotations;
-use super::compact::parse_compact;
 use super::block::{is_block_form, parse_block};
+use super::compact::parse_compact;
+use super::scanner::scan_annotations;
+use super::types::Annotation;
 
 /// Parse all annotations in `content`, recognizing `mark_codes` as valid
 /// philological mark codes (e.g. workspace-extended codes from `.lit/marks.toml`).
@@ -37,8 +37,8 @@ pub fn parse_annotations_builtin(content: &str) -> Vec<Annotation> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::*;
+    use super::*;
 
     #[test]
     fn single_compact_annotation() {
@@ -80,7 +80,8 @@ mod tests {
 
     #[test]
     fn mixed_compact_and_block() {
-        let doc = "<!--- n: | inline note --->\n\nParagraph.\n\n<!---\ncf\n---\nBlock crossref.\n--->";
+        let doc =
+            "<!--- n: | inline note --->\n\nParagraph.\n\n<!---\ncf\n---\nBlock crossref.\n--->";
         let anns = parse_annotations_builtin(doc);
         assert_eq!(anns.len(), 2);
         assert_eq!(anns[0].form, AnnotationForm::Compact);

@@ -50,7 +50,12 @@ The crate also ships a thin `lit-annotation` binary for shell-level inspection a
 ```bash
 cargo build --release
 # binary at target/release/lit-annotation
+
+# or without installing:
+cargo run --bin lit-annotation -- --help
 ```
+
+**Document mode is the default.** Input is scanned for `<!--- ... --->` fences and legacy `%%! ... %%` markers. Plain prose, markdown thematic breaks (`---`), and pipe characters are not treated as annotations - zero matches yields `[]`. Pass `--bare` only when the entire input is a single fence-free annotation body.
 
 ```console
 # block form (document with annotation comments)
@@ -66,37 +71,42 @@ EOF
 # compact (inline) form
 $ echo '<!--- n? ^"dharma" | Possibly a technical term here. --->' | lit-annotation --pretty
 
-# bare input (no <!--- fences): treated as a single annotation body
-$ lit-annotation <<'EOF'
+# bare input (no fences): requires --bare
+$ lit-annotation --bare <<'EOF'
 n
 ^"viracitaḥ"
 ---
 Past participle of vi + √rac ("to arrange, compose") - "composed by, authored by."
 EOF
 
-# pipe-friendly
+# pipe-friendly (broken pipe from `head`/`jq` exits 0 quietly)
 $ cat doc.md | lit-annotation | jq '.[].body'
 
-# one or more file args instead of stdin
+# one or more file args instead of stdin; each annotation carries a `file` field
 $ lit-annotation notes.md chapter2.md
 
-# CI lint: fail if any annotation is unstructured
+# dash-named files via end-of-options separator
+$ lit-annotation -- --strict
+
+# CI lint: fail if any annotation is unstructured (diagnostics on stderr)
 $ lit-annotation --strict notes.md > /dev/null
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--pretty` | Pretty-print JSON (default: compact single-line) |
-| `--strict` | Exit 2 if any parsed annotation has `is_structured: false` |
-| `--marks <path>` | Load mark codes from a TOML file (overlay on builtins) |
+| `--strict` | Exit 2 if any parsed annotation has `is_structured: false`; writes a count line and per-offender diagnostics to stderr |
+| `--bare` | Treat input as a single fence-free annotation body (opt-in; default is document scan) |
+| `--marks <path>` | Load mark codes from a TOML file (overlay on builtins). Rejects `-` and dash-leading values. |
+| `--` | End of options; remaining args are file paths |
 | `-h`, `--help` / `--version` | Standard |
 
-With no `FILE` args, read stdin. Multiple files yield one combined JSON array in file order. Zero annotations yields `[]`, not an error.
+With no `FILE` args, read stdin (`file` is `null` on each annotation). Multiple files yield one combined JSON array in file order; each annotation includes a `file` field with the path as given. Zero annotations yields `[]`, not an error. A closed stdout pipe (e.g. `lit-annotation doc.md \| head -c 20`) exits 0 with empty stderr.
 
 | Exit code | Meaning |
 |-----------|---------|
-| 0 | Success (including zero annotations) |
-| 1 | I/O or usage error (unreadable file, bad flag); diagnostics on stderr |
+| 0 | Success (including zero annotations, including broken pipe) |
+| 1 | I/O or usage error (unreadable file, bad flag); short diagnostics on stderr (full usage only for parse errors) |
 | 2 | `--strict` only: at least one annotation parsed as unstructured |
 
 ## Development

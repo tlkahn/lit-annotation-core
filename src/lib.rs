@@ -4,14 +4,14 @@
 //! identical grammar. Grammar changes ship as new tags; consumers pin tags and
 //! never track `main`.
 
-pub mod types;
-pub mod lang;
-pub mod scanner;
-pub mod compact;
 pub mod block;
+pub mod compact;
+pub mod emit;
+pub mod lang;
 pub mod marks;
 pub mod parser;
-pub mod emit;
-pub mod scope_resolver;
 #[cfg(test)]
 mod round_trip;
+pub mod scanner;
+pub mod scope_resolver;
+pub mod types;

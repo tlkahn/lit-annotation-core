@@ -1,24 +1,40 @@
 //! CLI for the Lit annotation DSL.
 //!
-//! Reads a Lit document (or bare annotation text) from stdin or file arguments
-//! and emits the parsed annotation AST as a JSON array on stdout.
+//! Reads a Lit document from stdin or file arguments and emits the parsed
+//! annotation AST as a JSON array on stdout. Default is document mode (scan for
+//! `<!--- ... --->` and legacy `%%! ... %%` fences). Pass `--bare` to treat the
+//! input as a single fence-free annotation body.
 
 use lit_annotation_core::block::{is_block_form, parse_block};
 use lit_annotation_core::compact::parse_compact;
-use lit_annotation_core::marks::{builtin_config, builtin_mark_codes, sorted_mark_codes, MarkConfig};
+use lit_annotation_core::marks::{
+    builtin_mark_codes, overlay_on_builtins, sorted_mark_codes, MarkConfig,
+};
 use lit_annotation_core::parser::parse_annotations;
 use lit_annotation_core::scanner::utf16_len;
 use lit_annotation_core::types::Annotation;
+use serde::Serialize;
 use std::env;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+/// CLI output wrapper: library `Annotation` plus optional source-file attribution.
+#[derive(Debug, Serialize)]
+struct OutputAnnotation {
+    #[serde(flatten)]
+    annotation: Annotation,
+    /// Path as given on the CLI, or `null` for stdin.
+    file: Option<String>,
+}
 
 /// Parsed command-line options for a normal run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     pretty: bool,
     strict: bool,
+    /// Opt into fence-free single-annotation parsing. Default is document mode.
+    bare: bool,
     marks: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
@@ -39,12 +55,17 @@ fn usage() -> String {
      Options:\n\
        --pretty         Pretty-print JSON (2-space indent)\n\
        --strict         Exit 2 if any annotation is unstructured\n\
+       --bare           Treat input as a single fence-free annotation\n\
        --marks <path>   Load mark codes from a TOML file (overlay on builtins)\n\
+       --               End of options; remaining args are file paths\n\
        -h, --help       Print help\n\
        --version        Print version\n\
      \n\
+     Default is document mode: scan for <!--- ... ---> (and legacy %%! ... %%)\n\
+     fences. Use --bare for a single fence-free annotation body.\n\
      With no FILE args, read stdin. Multiple files yield one combined JSON array\n\
-     in file order. Exit codes: 0 success, 1 I/O or usage error, 2 strict violation.\n"
+     in file order (each annotation carries a `file` field). Exit codes: 0\n\
+     success, 1 I/O or usage error, 2 strict violation.\n"
         .to_string()
 }
 
@@ -52,24 +73,34 @@ fn usage() -> String {
 fn parse_args(args: &[String]) -> Result<Cmd, String> {
     let mut pretty = false;
     let mut strict = false;
+    let mut bare = false;
     let mut marks: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = Vec::new();
 
     let mut i = 0;
+    let mut positional_only = false;
     while i < args.len() {
         let arg = &args[i];
+        if positional_only {
+            files.push(PathBuf::from(arg));
+            i += 1;
+            continue;
+        }
         match arg.as_str() {
             "-h" | "--help" => return Ok(Cmd::Help),
             "--version" => return Ok(Cmd::Version),
             "--pretty" => pretty = true,
             "--strict" => strict = true,
+            "--bare" => bare = true,
+            "--" => {
+                // End of options: remaining args are positional file paths.
+                positional_only = true;
+            }
             "--marks" => {
                 i += 1;
-                match args.get(i) {
-                    Some(path) if !path.starts_with('-') || path == "-" => {
-                        marks = Some(PathBuf::from(path));
-                    }
-                    _ => return Err("missing value for --marks".to_string()),
+                match args.get(i).map(String::as_str) {
+                    None => return Err("missing value for --marks".to_string()),
+                    Some(path) => marks = Some(parse_marks_value(path)?),
                 }
             }
             s if s.starts_with("--marks=") => {
@@ -77,7 +108,7 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
                 if path.is_empty() {
                     return Err("missing value for --marks".to_string());
                 }
-                marks = Some(PathBuf::from(path));
+                marks = Some(parse_marks_value(path)?);
             }
             s if s.starts_with('-') => {
                 return Err(format!("unknown flag: {s}"));
@@ -90,9 +121,27 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
     Ok(Cmd::Run(Options {
         pretty,
         strict,
+        bare,
         marks,
         files,
     }))
+}
+
+/// Validate a `--marks` value. Rejects stdin (`-`) and dash-leading paths so
+/// both `--marks -foo` and `--marks=-foo` share one clear error.
+fn parse_marks_value(path: &str) -> Result<PathBuf, String> {
+    if path == "-" {
+        return Err("marks cannot be read from stdin".to_string());
+    }
+    if path.starts_with('-') {
+        return Err(format!(
+            "invalid marks path '{path}': value must not start with '-'"
+        ));
+    }
+    if path.is_empty() {
+        return Err("missing value for --marks".to_string());
+    }
+    Ok(PathBuf::from(path))
 }
 
 /// Load mark codes: builtin fast path when `marks` is `None`, otherwise parse
@@ -105,26 +154,21 @@ fn load_mark_codes(marks: Option<&Path>) -> Result<Vec<String>, String> {
                 .map_err(|e| format!("failed to read marks file {}: {e}", path.display()))?;
             let overrides: MarkConfig = toml::from_str(&content)
                 .map_err(|e| format!("invalid marks TOML {}: {e}", path.display()))?;
-            let mut merged = builtin_config().clone();
-            for (code, def) in overrides.0 {
-                merged.0.insert(code, def);
-            }
+            let merged = overlay_on_builtins(overrides);
             Ok(sorted_mark_codes(&merged))
         }
     }
 }
 
-/// Parse one input blob into annotations.
-///
-/// - Content containing `<!---` is run through `parse_annotations`.
-/// - Otherwise the trimmed input is treated as bare annotation text and
-///   dispatched via `is_block_form` to the block or compact parser.
-/// - Whitespace-only bare input yields `[]`.
-fn parse_input(content: &str, codes: &[String]) -> Vec<Annotation> {
-    if content.contains("<!---") {
-        return parse_annotations(content, codes);
-    }
+/// Document mode: scan the full input for annotation fences
+/// (`<!--- ... --->` and legacy `%%! ... %%`).
+fn parse_document(content: &str, codes: &[String]) -> Vec<Annotation> {
+    parse_annotations(content, codes)
+}
 
+/// Bare mode: treat the trimmed input as a single fence-free annotation body.
+/// Whitespace-only input yields `[]`.
+fn parse_bare(content: &str, codes: &[String]) -> Vec<Annotation> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -141,50 +185,103 @@ fn parse_input(content: &str, codes: &[String]) -> Vec<Annotation> {
     vec![ann]
 }
 
-fn read_inputs(files: &[PathBuf]) -> Result<Vec<String>, String> {
+/// Route one input blob: document mode by default, bare mode only when flagged.
+fn parse_input(content: &str, codes: &[String], bare: bool) -> Vec<Annotation> {
+    if bare {
+        parse_bare(content, codes)
+    } else {
+        parse_document(content, codes)
+    }
+}
+
+/// Read inputs paired with an optional file path (None for stdin).
+fn read_inputs(files: &[PathBuf]) -> Result<Vec<(Option<String>, String)>, String> {
     if files.is_empty() {
         let mut buf = String::new();
         io::stdin()
             .read_to_string(&mut buf)
             .map_err(|e| format!("failed to read stdin: {e}"))?;
-        return Ok(vec![buf]);
+        return Ok(vec![(None, buf)]);
     }
 
     let mut contents = Vec::with_capacity(files.len());
     for path in files {
         let s = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        contents.push(s);
+        contents.push((Some(path.display().to_string()), s));
     }
     Ok(contents)
 }
 
-fn run(opts: Options) -> Result<i32, String> {
+/// Exit status distinguished from I/O/usage errors (`Err`).
+enum RunStatus {
+    Success,
+    StrictViolation,
+}
+
+fn run(opts: Options) -> Result<RunStatus, String> {
     let codes = load_mark_codes(opts.marks.as_deref())?;
     let inputs = read_inputs(&opts.files)?;
 
-    let mut annotations = Vec::new();
-    for content in &inputs {
-        annotations.extend(parse_input(content, &codes));
+    let mut output: Vec<OutputAnnotation> = Vec::new();
+    for (file, content) in &inputs {
+        for annotation in parse_input(content, &codes, opts.bare) {
+            output.push(OutputAnnotation {
+                annotation,
+                file: file.clone(),
+            });
+        }
     }
 
     let json = if opts.pretty {
-        serde_json::to_string_pretty(&annotations)
+        serde_json::to_string_pretty(&output)
     } else {
-        serde_json::to_string(&annotations)
+        serde_json::to_string(&output)
     }
     .map_err(|e| format!("failed to serialize JSON: {e}"))?;
 
     let mut stdout = io::stdout().lock();
-    stdout
+    match stdout
         .write_all(json.as_bytes())
         .and_then(|_| stdout.write_all(b"\n"))
-        .map_err(|e| format!("failed to write stdout: {e}"))?;
-
-    if opts.strict && annotations.iter().any(|a| !a.is_structured) {
-        return Ok(2);
+    {
+        Ok(()) => {}
+        // Downstream closed the pipe (e.g. `... | head`); exit quietly.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            return Ok(RunStatus::Success);
+        }
+        Err(e) => return Err(format!("failed to write stdout: {e}")),
     }
-    Ok(0)
+
+    if opts.strict {
+        let offenders: Vec<&OutputAnnotation> = output
+            .iter()
+            .filter(|a| !a.annotation.is_structured)
+            .collect();
+        if !offenders.is_empty() {
+            eprintln!("strict: {} unstructured annotation(s)", offenders.len());
+            for o in offenders {
+                let file = o.file.as_deref().unwrap_or("<stdin>");
+                let start = o.annotation.char_start;
+                let end = o.annotation.char_end;
+                let original = truncate_for_diag(&o.annotation.original, 60);
+                eprintln!("{file}:{start}..{end}: {original}");
+            }
+            return Ok(RunStatus::StrictViolation);
+        }
+    }
+    Ok(RunStatus::Success)
+}
+
+/// Truncate `s` to at most `max` chars, appending `...` when clipped.
+fn truncate_for_diag(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
 }
 
 fn main() -> ExitCode {
@@ -199,16 +296,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Cmd::Run(opts)) => match run(opts) {
-            Ok(0) => ExitCode::SUCCESS,
-            Ok(2) => ExitCode::from(2),
-            Ok(code) => ExitCode::from(code as u8),
+            Ok(RunStatus::Success) => ExitCode::SUCCESS,
+            Ok(RunStatus::StrictViolation) => ExitCode::from(2),
             Err(msg) => {
+                // Runtime errors: short message + one-line hint, no full usage dump.
                 eprintln!("error: {msg}");
-                eprintln!("{}", usage());
+                eprintln!("try 'lit-annotation --help' for usage");
                 ExitCode::from(1)
             }
         },
         Err(msg) => {
+            // Parse/usage errors still dump the full usage text.
             eprintln!("error: {msg}");
             eprintln!("{}", usage());
             ExitCode::from(1)
@@ -219,9 +317,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lit_annotation_core::types::{
-        AnnotationForm, AnnotationType, Certainty, Scope, ScopeKind,
-    };
+    use lit_annotation_core::types::{AnnotationForm, AnnotationType, Certainty, Scope, ScopeKind};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -238,9 +334,19 @@ mod tests {
             Cmd::Run(opts) => {
                 assert!(!opts.pretty);
                 assert!(!opts.strict);
+                assert!(!opts.bare);
                 assert!(opts.marks.is_none());
                 assert!(opts.files.is_empty());
             }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_bare() {
+        let cmd = parse_args(&s(&["--bare"])).unwrap();
+        match cmd {
+            Cmd::Run(opts) => assert!(opts.bare),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -301,14 +407,7 @@ mod tests {
 
     #[test]
     fn parse_args_combinations() {
-        let cmd = parse_args(&s(&[
-            "--pretty",
-            "--strict",
-            "--marks",
-            "m.toml",
-            "doc.md",
-        ]))
-        .unwrap();
+        let cmd = parse_args(&s(&["--pretty", "--strict", "--marks", "m.toml", "doc.md"])).unwrap();
         match cmd {
             Cmd::Run(opts) => {
                 assert!(opts.pretty);
@@ -343,13 +442,59 @@ mod tests {
         assert!(err.contains("missing value"), "err={err}");
     }
 
+    #[test]
+    fn parse_args_marks_stdin_rejected() {
+        let err = parse_args(&s(&["--marks", "-"])).unwrap_err();
+        assert!(
+            err.contains("marks cannot be read from stdin") || err.contains("stdin"),
+            "err={err}"
+        );
+    }
+
+    #[test]
+    fn parse_args_marks_dash_leading_value_rejected() {
+        let err1 = parse_args(&s(&["--marks", "-foo"])).unwrap_err();
+        let err2 = parse_args(&s(&["--marks=-foo"])).unwrap_err();
+        for err in [&err1, &err2] {
+            assert!(
+                err.contains("dash") || err.contains("invalid") || err.contains("-"),
+                "err={err}"
+            );
+            // Must not be the generic "missing value" message.
+            assert!(!err.contains("missing value"), "err={err}");
+        }
+    }
+
+    #[test]
+    fn parse_args_end_of_options_separator() {
+        let cmd = parse_args(&s(&["--", "--strict"])).unwrap();
+        match cmd {
+            Cmd::Run(opts) => {
+                assert!(!opts.strict, "--strict after -- must be a file");
+                assert_eq!(opts.files, vec![PathBuf::from("--strict")]);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_end_of_options_alone_uses_stdin() {
+        let cmd = parse_args(&s(&["--"])).unwrap();
+        match cmd {
+            Cmd::Run(opts) => {
+                assert!(opts.files.is_empty());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
     // --- parse_input: fenced path -----------------------------------------
 
     #[test]
     fn parse_input_fenced_compact() {
         let content = r#"<!--- n? ^"dharma" | Possibly a technical term here. --->"#;
         let codes = builtin_mark_codes();
-        let anns = parse_input(content, codes);
+        let anns = parse_document(content, codes);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].form, AnnotationForm::Compact);
         assert_eq!(anns[0].annotation_type, AnnotationType::Note);
@@ -365,13 +510,37 @@ mod tests {
     #[test]
     fn parse_input_skips_fenced_code_blocks() {
         let content = "```\n<!--- skip me --->\n```\n<!--- q? | keep --->";
-        let anns = parse_input(content, builtin_mark_codes());
+        let anns = parse_document(content, builtin_mark_codes());
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].annotation_type, AnnotationType::Question);
         assert_eq!(anns[0].body, Some("keep".to_string()));
     }
 
-    // --- parse_input: bare path -------------------------------------------
+    // --- parse_document / parse_bare --------------------------------------
+
+    #[test]
+    fn parse_document_plain_prose_yields_empty() {
+        assert!(parse_document("just prose", builtin_mark_codes()).is_empty());
+    }
+
+    #[test]
+    fn parse_document_legacy_percent_bang() {
+        let anns = parse_document("hello %%! n | legacy note %% more", builtin_mark_codes());
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].annotation_type, AnnotationType::Note);
+        assert_eq!(anns[0].body, Some("legacy note".to_string()));
+    }
+
+    #[test]
+    fn parse_input_routes_on_bare_flag() {
+        let prose = "just prose";
+        // document mode (default): prose is not an annotation
+        assert!(parse_input(prose, builtin_mark_codes(), false).is_empty());
+        // bare mode: prose becomes one unstructured annotation
+        let anns = parse_input(prose, builtin_mark_codes(), true);
+        assert_eq!(anns.len(), 1);
+        assert!(!anns[0].is_structured);
+    }
 
     #[test]
     fn parse_input_bare_block() {
@@ -381,7 +550,7 @@ n
 ---
 Past participle of vi + √rac ("to arrange, compose") - "composed by, authored by."
 "#;
-        let anns = parse_input(content, builtin_mark_codes());
+        let anns = parse_bare(content, builtin_mark_codes());
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].form, AnnotationForm::Block);
         assert_eq!(anns[0].annotation_type, AnnotationType::Note);
@@ -395,7 +564,7 @@ Past participle of vi + √rac ("to arrange, compose") - "composed by, authored 
     #[test]
     fn parse_input_bare_compact() {
         let content = "  n: | quick note  \n";
-        let anns = parse_input(content, builtin_mark_codes());
+        let anns = parse_bare(content, builtin_mark_codes());
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].form, AnnotationForm::Compact);
         assert_eq!(anns[0].annotation_type, AnnotationType::Note);
@@ -407,11 +576,13 @@ Past participle of vi + √rac ("to arrange, compose") - "composed by, authored 
 
     #[test]
     fn parse_input_whitespace_only_yields_empty() {
-        assert!(parse_input("   \n\t  \n", builtin_mark_codes()).is_empty());
-        assert!(parse_input("", builtin_mark_codes()).is_empty());
+        assert!(parse_bare("   \n\t  \n", builtin_mark_codes()).is_empty());
+        assert!(parse_bare("", builtin_mark_codes()).is_empty());
+        assert!(parse_document("   \n\t  \n", builtin_mark_codes()).is_empty());
+        assert!(parse_document("", builtin_mark_codes()).is_empty());
     }
 
-    // --- parse_input: scope coverage --------------------------------------
+    // --- parse_bare: scope coverage ---------------------------------------
 
     #[test]
     fn parse_input_scope_tokens() {
@@ -430,7 +601,10 @@ Past participle of vi + √rac ("to arrange, compose") - "composed by, authored 
             (r"n \ff | body", Scope::Page(2)),
             (r"n \h | body", Scope::Section),
             (r"n \d | body", Scope::Document),
-            (r#"n ^"anuttara" | body"#, Scope::Anchor("anuttara".to_string())),
+            (
+                r#"n ^"anuttara" | body"#,
+                Scope::Anchor("anuttara".to_string()),
+            ),
             (
                 r#"n ^"he said \"hi\"" | body"#,
                 Scope::Anchor(r#"he said "hi""#.to_string()),
@@ -471,7 +645,7 @@ Past participle of vi + √rac ("to arrange, compose") - "composed by, authored 
 
         let codes = builtin_mark_codes();
         for (input, expected) in cases {
-            let anns = parse_input(input, codes);
+            let anns = parse_bare(input, codes);
             assert_eq!(anns.len(), 1, "input={input:?}");
             assert_eq!(anns[0].scope, expected, "input={input:?}");
         }
@@ -513,7 +687,10 @@ label = "Custom ZZ"
     #[test]
     fn load_mark_codes_nonexistent_path() {
         let err = load_mark_codes(Some(Path::new("/nonexistent/marks.toml"))).unwrap_err();
-        assert!(err.contains("failed to read") || err.contains("No such"), "err={err}");
+        assert!(
+            err.contains("failed to read") || err.contains("No such"),
+            "err={err}"
+        );
     }
 
     #[test]

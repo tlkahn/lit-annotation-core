@@ -27,7 +27,10 @@ const U16MAP_STRIDE: usize = 1024;
 impl Utf16ByteMap {
     fn new(content: &str) -> Self {
         if content.is_ascii() {
-            return Self { ascii: true, checkpoints: Vec::new() };
+            return Self {
+                ascii: true,
+                checkpoints: Vec::new(),
+            };
         }
         let mut checkpoints = vec![(0u32, 0u32)];
         let mut utf16_acc = 0usize;
@@ -38,7 +41,10 @@ impl Utf16ByteMap {
             utf16_acc += ch.len_utf16();
         }
         checkpoints.push((utf16_acc as u32, content.len() as u32));
-        Self { ascii: false, checkpoints }
+        Self {
+            ascii: false,
+            checkpoints,
+        }
     }
 
     /// Same contract as `utf16_to_byte`: byte index of the first char at or
@@ -170,7 +176,10 @@ impl<'a> ScopeResolveCtx<'a> {
                     continue;
                 }
                 cursor = raw_start + seg.len();
-                spans.push(RawSeg { raw_start, raw_end: cursor });
+                spans.push(RawSeg {
+                    raw_start,
+                    raw_end: cursor,
+                });
             }
             spans
         })
@@ -184,12 +193,17 @@ impl<'a> ScopeResolveCtx<'a> {
             Scope::Page(n) => self.resolve_page(char_start, *n)?,
             Scope::Anchor(text) => self.resolve_anchor(char_start, text)?,
             Scope::Document => {
-                return Some(ScopeRange { start: 0, end: self.to_u16(self.content.len()) })
+                return Some(ScopeRange {
+                    start: 0,
+                    end: self.to_u16(self.content.len()),
+                })
             }
             Scope::Section => self.resolve_section(char_start)?,
-            Scope::Asymmetric { unit, before, after } => {
-                self.resolve_asymmetric(char_start, unit, *before, *after)?
-            }
+            Scope::Asymmetric {
+                unit,
+                before,
+                after,
+            } => self.resolve_asymmetric(char_start, unit, *before, *after)?,
         };
         Some(ScopeRange { start, end })
     }
@@ -207,19 +221,27 @@ impl<'a> ScopeResolveCtx<'a> {
                 match scope {
                     Scope::Words(n) => Some(ScopeRange {
                         start: backward.start,
-                        end: self.resolve_forward_words(char_start, *n).unwrap_or(backward.end),
+                        end: self
+                            .resolve_forward_words(char_start, *n)
+                            .unwrap_or(backward.end),
                     }),
                     Scope::Sentence(n) => Some(ScopeRange {
                         start: backward.start,
-                        end: self.resolve_forward_sentences(char_start, *n).unwrap_or(backward.end),
+                        end: self
+                            .resolve_forward_sentences(char_start, *n)
+                            .unwrap_or(backward.end),
                     }),
                     Scope::Paragraph(n) => Some(ScopeRange {
                         start: backward.start,
-                        end: self.resolve_forward_paragraphs(char_start, *n).unwrap_or(backward.end),
+                        end: self
+                            .resolve_forward_paragraphs(char_start, *n)
+                            .unwrap_or(backward.end),
                     }),
                     Scope::Page(n) => Some(ScopeRange {
                         start: backward.start,
-                        end: self.resolve_forward_pages(char_start, *n).unwrap_or(backward.end),
+                        end: self
+                            .resolve_forward_pages(char_start, *n)
+                            .unwrap_or(backward.end),
                     }),
                     _ => Some(backward),
                 }
@@ -650,7 +672,10 @@ impl<'a> ScopeResolveCtx<'a> {
             .map(|(off, _)| *off)
             .unwrap_or(content.len());
 
-        Some((self.to_u16(section_byte_start), self.to_u16(section_byte_end)))
+        Some((
+            self.to_u16(section_byte_start),
+            self.to_u16(section_byte_end),
+        ))
     }
 }
 
@@ -772,7 +797,12 @@ mod tests {
         s.len()
     }
 
-    fn resolve_sentence(content: &str, char_start: usize, n: usize, lang: &str) -> Option<(usize, usize)> {
+    fn resolve_sentence(
+        content: &str,
+        char_start: usize,
+        n: usize,
+        lang: &str,
+    ) -> Option<(usize, usize)> {
         if n == 0 {
             return None;
         }
@@ -805,7 +835,10 @@ mod tests {
         let (first_start, _) = kept[kept.len() - take];
         let (_, last_end) = kept[kept.len() - 1];
 
-        Some((utf16_len(&content[..first_start]), utf16_len(&content[..last_end])))
+        Some((
+            utf16_len(&content[..first_start]),
+            utf16_len(&content[..last_end]),
+        ))
     }
 
     fn resolve_paragraph(content: &str, char_start: usize, n: usize) -> Option<(usize, usize)> {
@@ -850,7 +883,12 @@ mod tests {
         Some((scope_start_utf16, scope_end_utf16))
     }
 
-    fn resolve_forward_sentences(content: &str, char_start: usize, n: usize, lang: &str) -> Option<usize> {
+    fn resolve_forward_sentences(
+        content: &str,
+        char_start: usize,
+        n: usize,
+        lang: &str,
+    ) -> Option<usize> {
         if n == 0 {
             return Some(char_start);
         }
@@ -1044,8 +1082,10 @@ mod tests {
         let content = "The term anuttara appears in this text.<!--- n: ^\"anuttara\" | note --->";
         let char_start = 39;
         let result = resolve_scope_range(
-            content, char_start,
-            &Scope::Anchor("anuttara".to_string()), "en",
+            content,
+            char_start,
+            &Scope::Anchor("anuttara".to_string()),
+            "en",
         );
         assert_eq!(result, Some(ScopeRange { start: 9, end: 17 }));
     }
@@ -1055,8 +1095,10 @@ mod tests {
         let content = "No match here.<!--- n: ^\"missing\" | note --->";
         let char_start = 15;
         let result = resolve_scope_range(
-            content, char_start,
-            &Scope::Anchor("missing".to_string()), "en",
+            content,
+            char_start,
+            &Scope::Anchor("missing".to_string()),
+            "en",
         );
         assert_eq!(result, None);
     }
@@ -1067,7 +1109,10 @@ mod tests {
         let ann_start = content.find("<!---").unwrap();
         let ann_start_utf16 = utf16_len(&content[..ann_start]);
         let result = resolve_scope_range(content, ann_start_utf16, &Scope::Sentence(1), "en");
-        assert!(result.is_some(), "scope should resolve despite double spaces");
+        assert!(
+            result.is_some(),
+            "scope should resolve despite double spaces"
+        );
         let range = result.unwrap();
         assert_eq!(range.start, 0);
         assert_eq!(range.end, ann_start_utf16);
@@ -1087,12 +1132,18 @@ mod tests {
 
     #[test]
     fn ws_flex_exact_match() {
-        assert_eq!(ws_flexible_find("hello world", "hello world", 0), Some((0, 11)));
+        assert_eq!(
+            ws_flexible_find("hello world", "hello world", 0),
+            Some((0, 11))
+        );
     }
 
     #[test]
     fn ws_flex_double_space_in_haystack() {
-        assert_eq!(ws_flexible_find("hello  world", "hello world", 0), Some((0, 12)));
+        assert_eq!(
+            ws_flexible_find("hello  world", "hello world", 0),
+            Some((0, 12))
+        );
     }
 
     #[test]
@@ -1102,7 +1153,10 @@ mod tests {
 
     #[test]
     fn ws_flex_start_offset() {
-        assert_eq!(ws_flexible_find("xx hello  world", "hello world", 3), Some((3, 15)));
+        assert_eq!(
+            ws_flexible_find("xx hello  world", "hello world", 3),
+            Some((3, 15))
+        );
     }
 
     #[test]
@@ -1114,7 +1168,13 @@ mod tests {
     fn document_scope_entire_content() {
         let content = "First line.\n\nSecond paragraph.\n\nThird paragraph.";
         let result = resolve_scope_range(content, 12, &Scope::Document, "en");
-        assert_eq!(result, Some(ScopeRange { start: 0, end: utf16_len(content) }));
+        assert_eq!(
+            result,
+            Some(ScopeRange {
+                start: 0,
+                end: utf16_len(content)
+            })
+        );
     }
 
     #[test]
@@ -1143,7 +1203,10 @@ mod tests {
         let content = "# Title\n\nText.\n\n## Last Section\n\nFinal text.";
         let char_start = utf16_len(&content[..content.len() - 5]);
         let range = resolve_scope_range(content, char_start, &Scope::Section, "en").unwrap();
-        assert_eq!(range.start, utf16_len(&content[..content.find("## Last Section").unwrap()]));
+        assert_eq!(
+            range.start,
+            utf16_len(&content[..content.find("## Last Section").unwrap()])
+        );
         assert_eq!(range.end, utf16_len(content));
     }
 
@@ -1151,7 +1214,13 @@ mod tests {
     fn section_scope_no_headings() {
         let content = "Just plain text with no headings.";
         let range = resolve_scope_range(content, 5, &Scope::Section, "en").unwrap();
-        assert_eq!(range, ScopeRange { start: 0, end: utf16_len(content) });
+        assert_eq!(
+            range,
+            ScopeRange {
+                start: 0,
+                end: utf16_len(content)
+            }
+        );
     }
 
     #[test]
@@ -1159,7 +1228,10 @@ mod tests {
         let content = "Preamble text.\n\n# First Heading\n\nBody.";
         let range = resolve_scope_range(content, 3, &Scope::Section, "en").unwrap();
         assert_eq!(range.start, 0);
-        assert_eq!(range.end, utf16_len(&content[..content.find("# First Heading").unwrap()]));
+        assert_eq!(
+            range.end,
+            utf16_len(&content[..content.find("# First Heading").unwrap()])
+        );
     }
 
     #[test]
@@ -1169,12 +1241,22 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Word, before: 1, after: 2 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Word,
+                before: 1,
+                after: 2,
+            },
             "en",
         );
         let range = result.unwrap();
-        assert_eq!(range.start, utf16_len(&content[..content.find("beta").unwrap()]));
-        assert_eq!(range.end, utf16_len(&content[..content.find("delta").unwrap() + "delta".len()]));
+        assert_eq!(
+            range.start,
+            utf16_len(&content[..content.find("beta").unwrap()])
+        );
+        assert_eq!(
+            range.end,
+            utf16_len(&content[..content.find("delta").unwrap() + "delta".len()])
+        );
     }
 
     #[test]
@@ -1184,12 +1266,19 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 2 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 2,
+            },
             "en",
         );
         let range = result.unwrap();
         assert_eq!(range.start, 0);
-        assert_eq!(range.end, utf16_len(&content[..content.find(" After third").unwrap()]));
+        assert_eq!(
+            range.end,
+            utf16_len(&content[..content.find(" After third").unwrap()])
+        );
     }
 
     #[test]
@@ -1199,11 +1288,18 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Paragraph, before: 1, after: 1 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Paragraph,
+                before: 1,
+                after: 1,
+            },
             "en",
         );
         let range = result.unwrap();
-        assert_eq!(range.end, utf16_len(&content[..content.find("\n\nAfter two").unwrap()]));
+        assert_eq!(
+            range.end,
+            utf16_len(&content[..content.find("\n\nAfter two").unwrap()])
+        );
     }
 
     #[test]
@@ -1213,11 +1309,18 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Page, before: 1, after: 1 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Page,
+                before: 1,
+                after: 1,
+            },
             "en",
         );
         let range = result.unwrap();
-        assert_eq!(range.end, utf16_len(&content[..content.rfind("\x0CPage four").unwrap()]));
+        assert_eq!(
+            range.end,
+            utf16_len(&content[..content.rfind("\x0CPage four").unwrap()])
+        );
     }
 
     #[test]
@@ -1241,7 +1344,13 @@ mod tests {
     fn backward_mode_matches_original() {
         let content = "hello world <!--- n --->";
         let cs = utf16_len(&content[..content.find("<!---").unwrap()]);
-        let backward = resolve_scope_range_with_mode(content, cs, &Scope::Words(1), "en", &ResolutionMode::Backward);
+        let backward = resolve_scope_range_with_mode(
+            content,
+            cs,
+            &Scope::Words(1),
+            "en",
+            &ResolutionMode::Backward,
+        );
         let original = resolve_scope_range(content, cs, &Scope::Words(1), "en");
         assert_eq!(backward, original);
     }
@@ -1250,7 +1359,10 @@ mod tests {
 
     #[test]
     fn ws_flex_double_newline_in_haystack() {
-        assert_eq!(ws_flexible_find("hello\n\nworld", "hello world", 0), Some((0, 12)));
+        assert_eq!(
+            ws_flexible_find("hello\n\nworld", "hello world", 0),
+            Some((0, 12))
+        );
     }
 
     #[test]
@@ -1283,7 +1395,8 @@ mod tests {
 
     #[test]
     fn sentence_crosses_two_paragraph_boundaries_backward() {
-        let content = "First sentence.\n\nSecond sentence.\n\nThird sentence.<!--- n \\sss | note --->";
+        let content =
+            "First sentence.\n\nSecond sentence.\n\nThird sentence.<!--- n \\sss | note --->";
         let char_start = utf16_len(&content[..content.find("<!---").unwrap()]);
         let result = resolve_scope_range(content, char_start, &Scope::Sentence(3), "en");
         let range = result.unwrap();
@@ -1317,7 +1430,11 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 2 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 2,
+            },
             "en",
         );
         let range = result.unwrap();
@@ -1331,7 +1448,11 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 1 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 1,
+            },
             "en",
         );
         let range = result.unwrap();
@@ -1348,7 +1469,11 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 5 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 5,
+            },
             "en",
         );
         let range = result.unwrap();
@@ -1362,7 +1487,11 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 2 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 2,
+            },
             "en",
         );
         let range = result.unwrap();
@@ -1422,7 +1551,11 @@ mod tests {
         let result = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 1 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 1,
+            },
             "en",
         );
         let range = result.unwrap();
@@ -1446,7 +1579,10 @@ mod tests {
         let content = "The dog ran. The cat sat. The dog ran. A last line.";
         let char_start = utf16_len(content);
         let range = resolve_scope_range(content, char_start, &Scope::Sentence(2), "en").unwrap();
-        assert_eq!(extract_text_for_range(content, &range), "The dog ran. A last line.");
+        assert_eq!(
+            extract_text_for_range(content, &range),
+            "The dog ran. A last line."
+        );
     }
 
     #[test]
@@ -1454,7 +1590,10 @@ mod tests {
         let content = "第一句话。第二句话。第一句话。最后一句。";
         let char_start = utf16_len(content);
         let range = resolve_scope_range(content, char_start, &Scope::Sentence(2), "zh").unwrap();
-        assert_eq!(extract_text_for_range(content, &range), "第一句话。最后一句。");
+        assert_eq!(
+            extract_text_for_range(content, &range),
+            "第一句话。最后一句。"
+        );
     }
 
     #[test]
@@ -1496,12 +1635,17 @@ mod tests {
     fn asymmetric_sentence_repeated_text() {
         // "The dog ran." recurs before the cut and "Echo now." after it; both
         // windows must land on the occurrence adjacent to the cut.
-        let content = "The dog ran. Alpha bit. The dog ran. Beta two. Echo now. Echo now. Zulu end.";
+        let content =
+            "The dog ran. Alpha bit. The dog ran. Beta two. Echo now. Echo now. Zulu end.";
         let char_start = utf16_len(&content[..content.find(" Echo now.").unwrap()]);
         let range = resolve_scope_range(
             content,
             char_start,
-            &Scope::Asymmetric { unit: ScopeKind::Sentence, before: 2, after: 2 },
+            &Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 2,
+                after: 2,
+            },
             "en",
         )
         .unwrap();
@@ -1625,7 +1769,9 @@ mod tests {
             let mut prev_end = 0;
             for s in segs {
                 assert!(
-                    s.raw_start >= prev_end && s.raw_end >= s.raw_start && s.raw_end <= content.len(),
+                    s.raw_start >= prev_end
+                        && s.raw_end >= s.raw_start
+                        && s.raw_end <= content.len(),
                     "spans must be monotonic and in-bounds in {content:?}"
                 );
                 assert!(
@@ -1740,18 +1886,38 @@ mod tests {
     fn sentence_parity_corpus() -> Vec<(String, &'static str)> {
         let mut corpus: Vec<(String, &'static str)> = vec![
             // multi-sentence English, cuts at boundaries and mid-sentence
-            ("The dog ran. The cat sat. A third sentence here. <!--- n --->".into(), "en"),
+            (
+                "The dog ran. The cat sat. A third sentence here. <!--- n --->".into(),
+                "en",
+            ),
             // repeated identical sentence text: the span selector must pick the
             // occurrence adjacent to the cut, not the first one in the document
-            ("Repeat me. Something else. Repeat me. Final one. <!--- n --->".into(), "en"),
-            ("The dog ran. The cat sat. The dog ran. A last line. <!--- n --->".into(), "en"),
-            ("第一句话。第二句话。第一句话。最后一句。<!--- n --->".into(), "zh"),
+            (
+                "Repeat me. Something else. Repeat me. Final one. <!--- n --->".into(),
+                "en",
+            ),
+            (
+                "The dog ran. The cat sat. The dog ran. A last line. <!--- n --->".into(),
+                "en",
+            ),
+            (
+                "第一句话。第二句话。第一句话。最后一句。<!--- n --->".into(),
+                "zh",
+            ),
             // double-space whitespace inside sentences
-            ("Maximum depth  $d = 5$  and  more. Second  has  double  spaces. <!--- n --->".into(), "en"),
+            (
+                "Maximum depth  $d = 5$  and  more. Second  has  double  spaces. <!--- n --->"
+                    .into(),
+                "en",
+            ),
             // CJK
             ("第一句话。第二句话。第三句话。<!--- n --->".into(), "zh"),
             // sentences across paragraph boundaries
-            ("First para one. First para two.\n\nSecond para one. Second para two. <!--- n --->".into(), "en"),
+            (
+                "First para one. First para two.\n\nSecond para one. Second para two. <!--- n --->"
+                    .into(),
+                "en",
+            ),
         ];
         // >10KB doc crossing sentencex's internal chunking threshold
         let big: String = (0..200)
@@ -1830,7 +1996,11 @@ mod tests {
             let ctx = ScopeResolveCtx::new(content, lang);
             for cs in sampled_u16_offsets(content) {
                 for (before, after) in [(0usize, 1usize), (1, 2), (2, 0), (100, 100)] {
-                    let scope = Scope::Asymmetric { unit: ScopeKind::Sentence, before, after };
+                    let scope = Scope::Asymmetric {
+                        unit: ScopeKind::Sentence,
+                        before,
+                        after,
+                    };
                     let expected_start = if before == 0 {
                         cs
                     } else {
@@ -1847,10 +2017,11 @@ mod tests {
                     );
                 }
                 for n in [1usize, 2] {
-                    let expected = resolve_sentence(content, cs, n, lang).map(|(s, e)| ScopeRange {
-                        start: s,
-                        end: resolve_forward_sentences(content, cs, n, lang).unwrap_or(e),
-                    });
+                    let expected =
+                        resolve_sentence(content, cs, n, lang).map(|(s, e)| ScopeRange {
+                            start: s,
+                            end: resolve_forward_sentences(content, cs, n, lang).unwrap_or(e),
+                        });
                     assert_eq!(
                         ctx.resolve_scope_range_with_mode(
                             cs,
@@ -1868,15 +2039,41 @@ mod tests {
     #[test]
     fn ctx_parity_asymmetric_and_mode() {
         let scopes = [
-            Scope::Asymmetric { unit: ScopeKind::Sentence, before: 1, after: 2 },
-            Scope::Asymmetric { unit: ScopeKind::Sentence, before: 0, after: 1 },
-            Scope::Asymmetric { unit: ScopeKind::Word, before: 2, after: 2 },
-            Scope::Asymmetric { unit: ScopeKind::Paragraph, before: 1, after: 1 },
-            Scope::Asymmetric { unit: ScopeKind::Page, before: 1, after: 1 },
+            Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 1,
+                after: 2,
+            },
+            Scope::Asymmetric {
+                unit: ScopeKind::Sentence,
+                before: 0,
+                after: 1,
+            },
+            Scope::Asymmetric {
+                unit: ScopeKind::Word,
+                before: 2,
+                after: 2,
+            },
+            Scope::Asymmetric {
+                unit: ScopeKind::Paragraph,
+                before: 1,
+                after: 1,
+            },
+            Scope::Asymmetric {
+                unit: ScopeKind::Page,
+                before: 1,
+                after: 1,
+            },
         ];
         let corpus = [
-            ("Before sentence. After first. After second. After third.", "en"),
-            ("Before.\n\nMiddle one. Middle two.\n\nAfter one.\n\nAfter two.", "en"),
+            (
+                "Before sentence. After first. After second. After third.",
+                "en",
+            ),
+            (
+                "Before.\n\nMiddle one. Middle two.\n\nAfter one.\n\nAfter two.",
+                "en",
+            ),
             ("Page one.\x0CPage two.\x0CPage three.", "en"),
             ("第一句话。第二句话。\n\n第三句话。第四句话。", "zh"),
         ];
@@ -1890,7 +2087,13 @@ mod tests {
                         "ctx/free-fn asymmetric mismatch for {scope:?} at char_start {cs} in {content:?}"
                     );
                 }
-                for scope in [Scope::Words(2), Scope::Sentence(1), Scope::Paragraph(1), Scope::Page(1), Scope::Section] {
+                for scope in [
+                    Scope::Words(2),
+                    Scope::Sentence(1),
+                    Scope::Paragraph(1),
+                    Scope::Page(1),
+                    Scope::Section,
+                ] {
                     for mode in [ResolutionMode::Backward, ResolutionMode::Bidirectional] {
                         assert_eq!(
                             ctx.resolve_scope_range_with_mode(cs, &scope, &mode),

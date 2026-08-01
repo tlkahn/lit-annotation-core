@@ -1,19 +1,16 @@
-use std::sync::LazyLock;
-use regex::Regex;
 use super::marks;
 use super::types::*;
+use regex::Regex;
+use std::sync::LazyLock;
 
-static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^@(\d{4}-\d{2}(?:-\d{2})?)$").unwrap()
-});
+static DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^@(\d{4}-\d{2}(?:-\d{2})?)$").unwrap());
 
-static ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^\^"((?:[^"\\]|\\.)+)"$"#).unwrap()
-});
+static ANCHOR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\^"((?:[^"\\]|\\.)+)"$"#).unwrap());
 
-static LANG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?i)lang\s*[:=]\s*(\S+)$").unwrap()
-});
+static LANG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?i)lang\s*[:=]\s*(\S+)$").unwrap());
 
 pub fn parse_block(inner: &str, mark_codes: &[String]) -> Annotation {
     let (head, body) = split_head_body(inner);
@@ -24,6 +21,9 @@ pub fn parse_block(inner: &str, mark_codes: &[String]) -> Annotation {
     let mut date = None;
     let mut mark: Option<String> = None;
     let mut lang: Option<String> = None;
+    // Any non-empty head line that matches none of the productions makes the
+    // block unstructured (so `--strict` treats it the same as compact form).
+    let mut unrecognized = false;
 
     for line in head.lines() {
         let line = line.trim();
@@ -72,7 +72,13 @@ pub fn parse_block(inner: &str, mark_codes: &[String]) -> Annotation {
                 if let Some(c) = cert_char {
                     certainty = Certainty::from_char(c);
                 }
+            } else {
+                unrecognized = true;
             }
+        } else {
+            // Type already set; leftover head lines that are not date/anchor/
+            // lang/scope are unrecognized.
+            unrecognized = true;
         }
     }
 
@@ -88,7 +94,7 @@ pub fn parse_block(inner: &str, mark_codes: &[String]) -> Annotation {
         scope,
         body,
         date,
-        is_structured: true,
+        is_structured: !unrecognized,
         char_start: 0,
         char_end: 0,
         original: String::new(),
@@ -156,7 +162,10 @@ mod tests {
         let ann = parse_block(inner, marks::builtin_mark_codes());
         assert_eq!(ann.annotation_type, AnnotationType::Question);
         assert_eq!(ann.certainty, Certainty::Tentative);
-        assert_eq!(ann.body, Some("Is this Jayaratha or Abhinavagupta?".to_string()));
+        assert_eq!(
+            ann.body,
+            Some("Is this Jayaratha or Abhinavagupta?".to_string())
+        );
     }
 
     #[test]
@@ -292,9 +301,14 @@ mod tests {
     fn block_asymmetric_paragraph_scope() {
         let inner = "n\n3\\p1\n---\nAsymmetric note.";
         let ann = parse_block(inner, marks::builtin_mark_codes());
-        assert_eq!(ann.scope, Scope::Asymmetric {
-            unit: ScopeKind::Paragraph, before: 3, after: 1,
-        });
+        assert_eq!(
+            ann.scope,
+            Scope::Asymmetric {
+                unit: ScopeKind::Paragraph,
+                before: 3,
+                after: 1,
+            }
+        );
     }
 
     #[test]
@@ -356,15 +370,22 @@ mod tests {
         assert_eq!(ann.annotation_type, AnnotationType::SlipNote);
         assert_eq!(ann.scope, Scope::Anchor("parent-uuid".to_string()));
         assert_eq!(ann.date, Some("2026-07-28".to_string()));
-        assert_eq!(ann.body, Some("Compare with Braudel's take on Mediterranean trade.".to_string()));
+        assert_eq!(
+            ann.body,
+            Some("Compare with Braudel's take on Mediterranean trade.".to_string())
+        );
     }
 
     #[test]
     fn block_slipnote_multiline_body() {
-        let inner = "sn\n^\"parent-uuid\"\n@2026-07-28\n---\nCompare with Braudel.\n\nAlso see chapter 4.";
+        let inner =
+            "sn\n^\"parent-uuid\"\n@2026-07-28\n---\nCompare with Braudel.\n\nAlso see chapter 4.";
         let ann = parse_block(inner, marks::builtin_mark_codes());
         assert_eq!(ann.annotation_type, AnnotationType::SlipNote);
-        assert_eq!(ann.body, Some("Compare with Braudel.\n\nAlso see chapter 4.".to_string()));
+        assert_eq!(
+            ann.body,
+            Some("Compare with Braudel.\n\nAlso see chapter 4.".to_string())
+        );
     }
 
     // --- lang: header line ---
@@ -425,5 +446,47 @@ mod tests {
         assert_eq!(ann.annotation_type, AnnotationType::Question);
         assert_eq!(ann.certainty, Certainty::Tentative);
         assert_eq!(ann.lang, Some("fr".to_string()));
+    }
+
+    // --- is_structured -----------------------------------------------------
+
+    #[test]
+    fn block_unrecognized_head_is_not_structured() {
+        let ann = parse_block("xyz\n---\nbody", marks::builtin_mark_codes());
+        assert_eq!(ann.annotation_type, AnnotationType::Bare);
+        assert!(!ann.is_structured);
+    }
+
+    #[test]
+    fn block_prose_head_is_not_structured() {
+        let inner = "Introduction paragraph.\n\n---\n\nSecond section text.";
+        let ann = parse_block(inner, marks::builtin_mark_codes());
+        assert!(!ann.is_structured);
+    }
+
+    #[test]
+    fn block_recognized_type_with_garbage_line_is_not_structured() {
+        let ann = parse_block("n\ngarbage\n---\nbody", marks::builtin_mark_codes());
+        assert_eq!(ann.annotation_type, AnnotationType::Note);
+        assert!(!ann.is_structured);
+    }
+
+    #[test]
+    fn block_structured_heads_remain_structured() {
+        let codes = marks::builtin_mark_codes();
+        // recognized type
+        assert!(parse_block("n\n---\nbody", codes).is_structured);
+        // mark
+        assert!(parse_block("nb\n---\nbody", codes).is_structured);
+        // scope
+        assert!(parse_block("n\n\\p\n---\nbody", codes).is_structured);
+        // anchor
+        assert!(parse_block("n\n^\"x\"\n---\nbody", codes).is_structured);
+        // date
+        assert!(parse_block("n\n@2026-03\n---\nbody", codes).is_structured);
+        // lang
+        assert!(parse_block("n\nlang: fr\n---\nbody", codes).is_structured);
+        // empty head: the separator itself is deliberate syntax
+        assert!(parse_block("---\nbody", codes).is_structured);
     }
 }

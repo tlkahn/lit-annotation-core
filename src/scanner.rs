@@ -1,5 +1,5 @@
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawAnnotation {
@@ -10,16 +10,16 @@ pub struct RawAnnotation {
     pub id: Option<String>,
 }
 
-static ID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[([a-zA-Z0-9][a-zA-Z0-9_.\-]*)\]").unwrap()
-});
+static ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[([a-zA-Z0-9][a-zA-Z0-9_.\-]*)\]").unwrap());
 
 pub fn is_valid_authored_id(id: &str) -> bool {
     !id.is_empty()
         && id.as_bytes()[0].is_ascii_alphanumeric()
-        && id.bytes().skip(1).all(|b| {
-            b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
-        })
+        && id
+            .bytes()
+            .skip(1)
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
 }
 
 pub fn extract_id(inner: &str) -> (Option<String>, &str) {
@@ -193,7 +193,9 @@ fn detect_fence_close(trimmed: &str, marker: &str) -> bool {
 }
 
 pub fn is_in_fenced_range(byte_offset: usize, ranges: &[FencedRange]) -> bool {
-    ranges.iter().any(|r| byte_offset >= r.start && byte_offset < r.end)
+    ranges
+        .iter()
+        .any(|r| byte_offset >= r.start && byte_offset < r.end)
 }
 
 #[cfg(test)]
@@ -468,7 +470,10 @@ mod tests {
         let doc = "<!---[550e8400-e29b-41d4-a716-446655440000] n? __ | body --->";
         let anns = scan_annotations(doc);
         assert_eq!(anns.len(), 1);
-        assert_eq!(anns[0].id, Some("550e8400-e29b-41d4-a716-446655440000".to_string()));
+        assert_eq!(
+            anns[0].id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
         assert_eq!(anns[0].inner, "n? __ | body");
     }
 
