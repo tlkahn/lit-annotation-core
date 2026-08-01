@@ -12,7 +12,7 @@ use lit_annotation_core::marks::{
 };
 use lit_annotation_core::parser::parse_annotations;
 use lit_annotation_core::scanner::utf16_len;
-use lit_annotation_core::types::Annotation;
+use lit_annotation_core::types::{Annotation, AnnotationType};
 use serde::Serialize;
 use std::env;
 use std::io::{self, Read, Write};
@@ -28,6 +28,13 @@ struct OutputAnnotation {
     file: Option<String>,
 }
 
+/// A positional input: a filesystem path, or `-` meaning stdin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Input {
+    Stdin,
+    Path(PathBuf),
+}
+
 /// Parsed command-line options for a normal run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
@@ -36,7 +43,7 @@ struct Options {
     /// Opt into fence-free single-annotation parsing. Default is document mode.
     bare: bool,
     marks: Option<PathBuf>,
-    files: Vec<PathBuf>,
+    inputs: Vec<Input>,
 }
 
 /// Top-level command distinguished by `parse_args`.
@@ -54,7 +61,7 @@ fn usage() -> String {
      \n\
      Options:\n\
        --pretty         Pretty-print JSON (2-space indent)\n\
-       --strict         Exit 2 if any annotation is unstructured\n\
+       --strict         Exit 2 if any annotation is unstructured or untyped (bare)\n\
        --bare           Treat input as a single fence-free annotation\n\
        --marks <path>   Load mark codes from a TOML file (overlay on builtins)\n\
        --               End of options; remaining args are file paths\n\
@@ -63,10 +70,24 @@ fn usage() -> String {
      \n\
      Default is document mode: scan for <!--- ... ---> (and legacy %%! ... %%)\n\
      fences. Use --bare for a single fence-free annotation body.\n\
-     With no FILE args, read stdin. Multiple files yield one combined JSON array\n\
-     in file order (each annotation carries a `file` field). Exit codes: 0\n\
+     With no FILE args, read stdin. `-` also reads stdin (at most once).\n\
+     Multiple inputs yield one combined JSON array in arg order (each\n\
+     annotation carries a `file` field; null for stdin). Exit codes: 0\n\
      success, 1 I/O or usage error, 2 strict violation.\n"
         .to_string()
+}
+
+/// Push a positional input, mapping `-` to stdin and rejecting a second `-`.
+fn push_input(inputs: &mut Vec<Input>, arg: &str) -> Result<(), String> {
+    if arg == "-" {
+        if inputs.iter().any(|i| matches!(i, Input::Stdin)) {
+            return Err("stdin (-) may be given at most once".to_string());
+        }
+        inputs.push(Input::Stdin);
+    } else {
+        inputs.push(Input::Path(PathBuf::from(arg)));
+    }
+    Ok(())
 }
 
 /// Parse CLI arguments (excluding argv[0]).
@@ -75,14 +96,14 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
     let mut strict = false;
     let mut bare = false;
     let mut marks: Option<PathBuf> = None;
-    let mut files: Vec<PathBuf> = Vec::new();
+    let mut inputs: Vec<Input> = Vec::new();
 
     let mut i = 0;
     let mut positional_only = false;
     while i < args.len() {
         let arg = &args[i];
         if positional_only {
-            files.push(PathBuf::from(arg));
+            push_input(&mut inputs, arg)?;
             i += 1;
             continue;
         }
@@ -93,13 +114,19 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
             "--strict" => strict = true,
             "--bare" => bare = true,
             "--" => {
-                // End of options: remaining args are positional file paths.
+                // End of options: remaining args are positional inputs.
                 positional_only = true;
             }
             "--marks" => {
                 i += 1;
                 match args.get(i).map(String::as_str) {
                     None => return Err("missing value for --marks".to_string()),
+                    // Next arg looks like a flag: clearer than "invalid marks path".
+                    Some(next) if next.starts_with('-') => {
+                        return Err(format!(
+                            "missing value for --marks (next argument '{next}' looks like a flag)"
+                        ));
+                    }
                     Some(path) => marks = Some(parse_marks_value(path)?),
                 }
             }
@@ -110,10 +137,11 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
                 }
                 marks = Some(parse_marks_value(path)?);
             }
+            "-" => push_input(&mut inputs, "-")?,
             s if s.starts_with('-') => {
                 return Err(format!("unknown flag: {s}"));
             }
-            _ => files.push(PathBuf::from(arg)),
+            other => push_input(&mut inputs, other)?,
         }
         i += 1;
     }
@@ -123,7 +151,7 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
         strict,
         bare,
         marks,
-        files,
+        inputs,
     }))
 }
 
@@ -194,21 +222,32 @@ fn parse_input(content: &str, codes: &[String], bare: bool) -> Vec<Annotation> {
     }
 }
 
+/// Read stdin once into a string.
+fn read_stdin() -> Result<String, String> {
+    let mut buf = String::new();
+    io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("failed to read stdin: {e}"))?;
+    Ok(buf)
+}
+
 /// Read inputs paired with an optional file path (None for stdin).
-fn read_inputs(files: &[PathBuf]) -> Result<Vec<(Option<String>, String)>, String> {
-    if files.is_empty() {
-        let mut buf = String::new();
-        io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| format!("failed to read stdin: {e}"))?;
-        return Ok(vec![(None, buf)]);
+/// Empty `inputs` means implicit stdin (no FILE args).
+fn read_inputs(inputs: &[Input]) -> Result<Vec<(Option<String>, String)>, String> {
+    if inputs.is_empty() {
+        return Ok(vec![(None, read_stdin()?)]);
     }
 
-    let mut contents = Vec::with_capacity(files.len());
-    for path in files {
-        let s = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        contents.push((Some(path.display().to_string()), s));
+    let mut contents = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        match input {
+            Input::Stdin => contents.push((None, read_stdin()?)),
+            Input::Path(path) => {
+                let s = std::fs::read_to_string(path)
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                contents.push((Some(path.display().to_string()), s));
+            }
+        }
     }
     Ok(contents)
 }
@@ -221,7 +260,7 @@ enum RunStatus {
 
 fn run(opts: Options) -> Result<RunStatus, String> {
     let codes = load_mark_codes(opts.marks.as_deref())?;
-    let inputs = read_inputs(&opts.files)?;
+    let inputs = read_inputs(&opts.inputs)?;
 
     let mut output: Vec<OutputAnnotation> = Vec::new();
     for (file, content) in &inputs {
@@ -240,37 +279,56 @@ fn run(opts: Options) -> Result<RunStatus, String> {
     }
     .map_err(|e| format!("failed to serialize JSON: {e}"))?;
 
+    // Compute strict offenders before writing stdout so a broken pipe cannot
+    // skip the exit-2 path (A2).
+    let offenders: Vec<&OutputAnnotation> = if opts.strict {
+        output
+            .iter()
+            .filter(|a| {
+                !a.annotation.is_structured || a.annotation.annotation_type == AnnotationType::Bare
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let has_strict_violation = !offenders.is_empty();
+
     let mut stdout = io::stdout().lock();
-    match stdout
+    let write_result = stdout
         .write_all(json.as_bytes())
-        .and_then(|_| stdout.write_all(b"\n"))
-    {
+        .and_then(|_| stdout.write_all(b"\n"));
+    match write_result {
         Ok(()) => {}
-        // Downstream closed the pipe (e.g. `... | head`); exit quietly.
+        // Downstream closed the pipe (e.g. `... | head`). Still honor --strict.
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            if has_strict_violation {
+                emit_strict_diagnostics(&offenders);
+                return Ok(RunStatus::StrictViolation);
+            }
             return Ok(RunStatus::Success);
         }
         Err(e) => return Err(format!("failed to write stdout: {e}")),
     }
 
-    if opts.strict {
-        let offenders: Vec<&OutputAnnotation> = output
-            .iter()
-            .filter(|a| !a.annotation.is_structured)
-            .collect();
-        if !offenders.is_empty() {
-            eprintln!("strict: {} unstructured annotation(s)", offenders.len());
-            for o in offenders {
-                let file = o.file.as_deref().unwrap_or("<stdin>");
-                let start = o.annotation.char_start;
-                let end = o.annotation.char_end;
-                let original = truncate_for_diag(&o.annotation.original, 60);
-                eprintln!("{file}:{start}..{end}: {original}");
-            }
-            return Ok(RunStatus::StrictViolation);
-        }
+    if has_strict_violation {
+        emit_strict_diagnostics(&offenders);
+        return Ok(RunStatus::StrictViolation);
     }
     Ok(RunStatus::Success)
+}
+
+fn emit_strict_diagnostics(offenders: &[&OutputAnnotation]) {
+    eprintln!(
+        "strict: {} violation(s) (unstructured or untyped)",
+        offenders.len()
+    );
+    for o in offenders {
+        let file = o.file.as_deref().unwrap_or("<stdin>");
+        let start = o.annotation.char_start;
+        let end = o.annotation.char_end;
+        let original = truncate_for_diag(&o.annotation.original, 60);
+        eprintln!("{file}:{start}..{end}: {original}");
+    }
 }
 
 /// Truncate `s` to at most `max` chars, appending `...` when clipped.
@@ -336,7 +394,7 @@ mod tests {
                 assert!(!opts.strict);
                 assert!(!opts.bare);
                 assert!(opts.marks.is_none());
-                assert!(opts.files.is_empty());
+                assert!(opts.inputs.is_empty());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -397,8 +455,11 @@ mod tests {
         match cmd {
             Cmd::Run(opts) => {
                 assert_eq!(
-                    opts.files,
-                    vec![PathBuf::from("a.md"), PathBuf::from("b.md")]
+                    opts.inputs,
+                    vec![
+                        Input::Path(PathBuf::from("a.md")),
+                        Input::Path(PathBuf::from("b.md")),
+                    ]
                 );
             }
             other => panic!("expected Run, got {other:?}"),
@@ -413,10 +474,32 @@ mod tests {
                 assert!(opts.pretty);
                 assert!(opts.strict);
                 assert_eq!(opts.marks.as_deref(), Some(Path::new("m.toml")));
-                assert_eq!(opts.files, vec![PathBuf::from("doc.md")]);
+                assert_eq!(opts.inputs, vec![Input::Path(PathBuf::from("doc.md"))]);
             }
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_args_dash_is_stdin() {
+        let cmd = parse_args(&s(&["-"])).unwrap();
+        match cmd {
+            Cmd::Run(opts) => assert_eq!(opts.inputs, vec![Input::Stdin]),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_duplicate_dash_rejected() {
+        let err = parse_args(&s(&["-", "-"])).unwrap_err();
+        assert!(err.contains("at most once"), "err={err}");
+    }
+
+    #[test]
+    fn parse_args_marks_flag_like_next_arg() {
+        let err = parse_args(&s(&["--marks", "--strict"])).unwrap_err();
+        assert!(err.contains("missing value for --marks"), "err={err}");
+        assert!(err.contains("looks like a flag"), "err={err}");
     }
 
     #[test]
@@ -443,8 +526,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_marks_stdin_rejected() {
+    fn parse_args_marks_stdin_space_form_looks_like_missing_value() {
+        // Space-form `--marks -`: `-` looks like a flag, so A5a wins over the
+        // dedicated stdin rejection (equals-form still uses parse_marks_value).
         let err = parse_args(&s(&["--marks", "-"])).unwrap_err();
+        assert!(err.contains("missing value for --marks"), "err={err}");
+    }
+
+    #[test]
+    fn parse_args_marks_stdin_equals_form_rejected() {
+        let err = parse_args(&s(&["--marks=-"])).unwrap_err();
         assert!(
             err.contains("marks cannot be read from stdin") || err.contains("stdin"),
             "err={err}"
@@ -452,17 +543,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_marks_dash_leading_value_rejected() {
-        let err1 = parse_args(&s(&["--marks", "-foo"])).unwrap_err();
-        let err2 = parse_args(&s(&["--marks=-foo"])).unwrap_err();
-        for err in [&err1, &err2] {
-            assert!(
-                err.contains("dash") || err.contains("invalid") || err.contains("-"),
-                "err={err}"
-            );
-            // Must not be the generic "missing value" message.
-            assert!(!err.contains("missing value"), "err={err}");
-        }
+    fn parse_args_marks_dash_leading_space_form_is_missing_value() {
+        let err = parse_args(&s(&["--marks", "-foo"])).unwrap_err();
+        assert!(err.contains("missing value for --marks"), "err={err}");
+        assert!(err.contains("looks like a flag"), "err={err}");
+    }
+
+    #[test]
+    fn parse_args_marks_dash_leading_equals_form_rejected() {
+        let err = parse_args(&s(&["--marks=-foo"])).unwrap_err();
+        assert!(
+            err.contains("dash") || err.contains("invalid") || err.contains("-"),
+            "err={err}"
+        );
+        assert!(!err.contains("missing value"), "err={err}");
     }
 
     #[test]
@@ -471,7 +565,7 @@ mod tests {
         match cmd {
             Cmd::Run(opts) => {
                 assert!(!opts.strict, "--strict after -- must be a file");
-                assert_eq!(opts.files, vec![PathBuf::from("--strict")]);
+                assert_eq!(opts.inputs, vec![Input::Path(PathBuf::from("--strict"))]);
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -482,8 +576,17 @@ mod tests {
         let cmd = parse_args(&s(&["--"])).unwrap();
         match cmd {
             Cmd::Run(opts) => {
-                assert!(opts.files.is_empty());
+                assert!(opts.inputs.is_empty());
             }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_dash_after_double_dash_is_stdin() {
+        let cmd = parse_args(&s(&["--", "-"])).unwrap();
+        match cmd {
+            Cmd::Run(opts) => assert_eq!(opts.inputs, vec![Input::Stdin]),
             other => panic!("expected Run, got {other:?}"),
         }
     }

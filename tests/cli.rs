@@ -257,11 +257,12 @@ fn marks_missing_value_dumps_usage() {
 
 #[test]
 fn broken_pipe_exits_0_quietly() {
-    // Produce enough output that writing past a short-lived reader hits EPIPE.
+    // Produce far more than 64 KiB of stdout so writing past a short-lived
+    // reader reliably hits EPIPE (pipe capacity is typically 64 KiB).
     let mut input = String::new();
-    for i in 0..200 {
+    for i in 0..1000 {
         input.push_str(&format!(
-            "<!--- n: | annotation number {i} with some padding text --->\n"
+            "<!--- n: | annotation number {i:04} with substantial padding text to grow the JSON payload well past the OS pipe buffer capacity --->\n"
         ));
     }
 
@@ -303,6 +304,54 @@ fn broken_pipe_exits_0_quietly() {
     );
 }
 
+#[test]
+fn strict_violation_survives_broken_pipe() {
+    // 1 unstructured violation + enough structured annotations that stdout
+    // exceeds pipe capacity. Closing stdout early must still exit 2.
+    let mut input = String::from("<!--- compare Vasugupta SpK 1.1 --->\n");
+    for i in 0..1000 {
+        input.push_str(&format!(
+            "<!--- n: | annotation number {i:04} with substantial padding text to grow the JSON payload well past the OS pipe buffer capacity --->\n"
+        ));
+    }
+
+    let mut child = bin()
+        .args(["--strict"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    {
+        let mut h = child.stdin.take().expect("stdin");
+        h.write_all(input.as_bytes()).expect("write stdin");
+    }
+
+    {
+        use std::io::Read;
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut buf = [0u8; 20];
+        let _ = stdout.read(&mut buf);
+    }
+
+    let mut stderr_buf = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read;
+        let _ = err.read_to_string(&mut stderr_buf);
+    }
+    let status = child.wait().expect("wait");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "strict violation must survive broken pipe, got {status:?}; stderr={stderr_buf:?}"
+    );
+    assert!(
+        stderr_buf.contains("strict:") && stderr_buf.contains("violation"),
+        "stderr must report strict violation, got: {stderr_buf:?}"
+    );
+}
+
 // --- 10. --strict ---------------------------------------------------------
 
 #[test]
@@ -327,7 +376,7 @@ fn strict_emits_stderr_diagnostics() {
 
     let err = stderr_str(&out);
     assert!(
-        err.contains("strict: 1 unstructured annotation(s)"),
+        err.contains("strict: 1 violation(s) (unstructured or untyped)"),
         "stderr missing count line: {err}"
     );
     assert!(
@@ -354,7 +403,7 @@ fn strict_diagnostics_include_file_path() {
     assert_eq!(out.status.code(), Some(2), "stderr={}", stderr_str(&out));
     let err = stderr_str(&out);
     assert!(
-        err.contains("strict: 1 unstructured annotation(s)"),
+        err.contains("strict: 1 violation(s) (unstructured or untyped)"),
         "stderr={err}"
     );
     assert!(err.contains(path), "stderr should include file path: {err}");
@@ -367,6 +416,42 @@ fn strict_with_only_structured_exits_0() {
     assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
     let v = parse_json(&out);
     assert_eq!(v[0]["is_structured"], true);
+}
+
+#[test]
+fn strict_rejects_bare_with_lone_pipe() {
+    let input = "<!--- | just pipe --->";
+    let out = run_stdin(&["--strict"], input);
+    assert_eq!(out.status.code(), Some(2), "stderr={}", stderr_str(&out));
+    let err = stderr_str(&out);
+    assert!(
+        err.contains("strict:") && err.contains("violation"),
+        "stderr={err}"
+    );
+}
+
+#[test]
+fn strict_rejects_bare_date_only() {
+    let input = "<!--- @2026-03 --->";
+    let out = run_stdin(&["--strict"], input);
+    assert_eq!(out.status.code(), Some(2), "stderr={}", stderr_str(&out));
+}
+
+#[test]
+fn strict_rejects_bare_empty_block_head() {
+    let input = "<!---\n---\njust a note body\n--->";
+    let out = run_stdin(&["--strict"], input);
+    assert_eq!(out.status.code(), Some(2), "stderr={}", stderr_str(&out));
+}
+
+#[test]
+fn strict_accepts_typed_and_mark() {
+    let input = r#"<!--- n: | typed note --->
+<!--- sic | x --->"#;
+    let out = run_stdin(&["--strict"], input);
+    assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
+    let v = parse_json(&out);
+    assert_eq!(v.as_array().unwrap().len(), 2);
 }
 
 // --- 11. --marks ----------------------------------------------------------
@@ -410,8 +495,18 @@ fn marks_nonexistent_exits_1() {
 }
 
 #[test]
-fn marks_stdin_dash_rejected() {
+fn marks_stdin_dash_space_form_is_missing_value() {
+    // Space-form `--marks -`: next arg looks like a flag (A5a).
     let out = run_args(&["--marks", "-"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_str(&out);
+    assert!(err.contains("missing value for --marks"), "stderr={err}");
+    assert!(err.contains("Usage:"), "stderr={err}");
+}
+
+#[test]
+fn marks_stdin_dash_equals_form_rejected() {
+    let out = run_args(&["--marks=-"]);
     assert_eq!(out.status.code(), Some(1));
     let err = stderr_str(&out);
     assert!(
@@ -421,17 +516,34 @@ fn marks_stdin_dash_rejected() {
 }
 
 #[test]
-fn marks_dash_leading_values_rejected_consistently() {
-    for args in [&["--marks", "-foo"][..], &["--marks=-foo"][..]] {
-        let out = run_args(args);
-        assert_eq!(out.status.code(), Some(1), "args={args:?}");
-        let err = stderr_str(&out);
-        assert!(
-            !err.contains("missing value"),
-            "dash-leading marks value must not look like missing value; args={args:?} err={err}"
-        );
-        assert!(err.contains("Usage:"), "args={args:?} err={err}");
-    }
+fn marks_flag_like_next_arg_is_missing_value() {
+    let out = run_args(&["--marks", "--strict"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_str(&out);
+    assert!(err.contains("missing value for --marks"), "stderr={err}");
+    assert!(err.contains("looks like a flag"), "stderr={err}");
+    assert!(err.contains("Usage:"), "stderr={err}");
+}
+
+#[test]
+fn marks_dash_leading_space_form_is_missing_value() {
+    let out = run_args(&["--marks", "-foo"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_str(&out);
+    assert!(err.contains("missing value for --marks"), "stderr={err}");
+    assert!(err.contains("Usage:"), "stderr={err}");
+}
+
+#[test]
+fn marks_dash_leading_equals_form_rejected() {
+    let out = run_args(&["--marks=-foo"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_str(&out);
+    assert!(
+        !err.contains("missing value"),
+        "equals-form dash-leading marks value must not look like missing value; err={err}"
+    );
+    assert!(err.contains("Usage:"), "err={err}");
 }
 
 #[test]
@@ -453,6 +565,68 @@ fn end_of_options_alone_reads_stdin() {
     assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
     let v = parse_json(&out);
     assert_eq!(v[0]["body"], "via dash dash");
+}
+
+// --- L5: `-` reads stdin --------------------------------------------------
+
+#[test]
+fn dash_reads_stdin() {
+    let out = run_stdin(&["-"], r#"<!--- n: | x --->"#);
+    assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
+    let v = parse_json(&out);
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["body"], "x");
+    assert!(v[0]["file"].is_null(), "file={:?}", v[0]["file"]);
+}
+
+#[test]
+fn dash_after_double_dash_reads_stdin() {
+    let out = run_stdin(&["--", "-"], r#"<!--- n: | via dash after eoopt --->"#);
+    assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
+    let v = parse_json(&out);
+    assert_eq!(v[0]["body"], "via dash after eoopt");
+    assert!(v[0]["file"].is_null());
+}
+
+#[test]
+fn dash_mixed_with_file() {
+    let mut f = NamedTempFile::new().unwrap();
+    write!(f, r#"<!--- n: | from file --->"#).unwrap();
+    let path = f.path().to_str().unwrap();
+
+    // file then stdin
+    let out = run_stdin(&[path, "-"], r#"<!--- q: | from stdin --->"#);
+    assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
+    let v = parse_json(&out);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["body"], "from file");
+    assert_eq!(arr[0]["file"], path);
+    assert_eq!(arr[1]["body"], "from stdin");
+    assert!(arr[1]["file"].is_null());
+
+    // stdin then file
+    let out = run_stdin(&["-", path], r#"<!--- q: | from stdin first --->"#);
+    assert_eq!(out.status.code(), Some(0), "stderr={}", stderr_str(&out));
+    let v = parse_json(&out);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["body"], "from stdin first");
+    assert!(arr[0]["file"].is_null());
+    assert_eq!(arr[1]["body"], "from file");
+    assert_eq!(arr[1]["file"], path);
+}
+
+#[test]
+fn duplicate_dash_is_usage_error() {
+    let out = run_args(&["-", "-"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_str(&out);
+    assert!(
+        err.contains("stdin") || err.contains("-"),
+        "stderr should mention duplicate stdin/- , got: {err}"
+    );
+    assert!(err.contains("Usage:"), "stderr={err}");
 }
 
 // --- 12. help / version / unknown ----------------------------------------
